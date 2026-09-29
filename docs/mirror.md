@@ -1,6 +1,6 @@
 # npm mirror: `@viniciosrab/pi-claude-bridge`
 
-This fork publishes [`pi-claude-bridge`](https://www.npmjs.com/package/pi-claude-bridge) (by Eli Dickinson, MIT) as `@viniciosrab/pi-claude-bridge`, with one addition: the `provider.loadClaudeSettings` option ([upstream PR #142](https://github.com/elidickinson/pi-claude-bridge/pull/142)). Versions match upstream exactly.
+This fork publishes [`pi-claude-bridge`](https://www.npmjs.com/package/pi-claude-bridge) (by Eli Dickinson, MIT) as `@viniciosrab/pi-claude-bridge`, with fork-only additions: the `provider.loadClaudeSettings` option ([upstream PR #142](https://github.com/elidickinson/pi-claude-bridge/pull/142)) and the `provider.rateLimitWarnings` option. Versions match upstream, except fork revisions: `X.Y.(Z+1)-fork.N` ships newer fix commits on top of upstream `X.Y.Z` before upstream releases again.
 
 ## How it works
 
@@ -8,7 +8,7 @@ The workflow [`.github/workflows/mirror-release.yml`](../.github/workflows/mirro
 
 | Job | Permissions | Runs upstream code | What it does |
 | --- | --- | --- | --- |
-| `build` | `contents: read`, token not persisted | yes | `build`: picks the versions to mirror, cherry-picks the fix, applies the fork identity, runs `npm ci`, `test:unit`, `typecheck`, `npm pack`. Uploads the tarballs plus metadata. |
+| `build` | `contents: read`, token not persisted | yes | `build`: picks the versions to mirror (or a fork revision), cherry-picks the fix, applies the fork identity, runs `npm ci`, `test:unit`, `typecheck`, `npm pack`. Uploads the tarballs plus metadata. |
 | `publish` | `contents: write`, `id-token: write` | no | `publish`: publishes the tarballs, then pushes `patches` and the tags. |
 | `sync-main` | `contents: write` | no | `sync-main`: merges `upstream/main` into `main` and pushes. |
 | `report-failure` | `issues: write` | no | Opens or updates the **Mirror release failed** issue. |
@@ -21,11 +21,25 @@ The workflow [`.github/workflows/mirror-release.yml`](../.github/workflows/mirro
 
 Each version is read from npm along with its `gitHead`. Upstream does not use GitHub Releases, so npm is the source of truth.
 
+### Fork revisions
+
+When there is no upstream version to mirror and no `--version`, the build checks whether `patches` changed since the fork's last publish:
+
+- **The published fix commits** are those of the tag `mirror-v<L>`, where `L` is the fork's `latest` dist-tag. `L` must be the fork's highest stable version `B`, or a fork revision of `B`; anything else fails the run.
+- **The comparison:** the fix commits are the commits outside upstream history and outside `B`'s `gitHead`. Their patch-ids (`git patch-id --stable`, oldest first) are compared for `patches` and for the tag. Patch-ids ignore the base, so a rebased but identical fix counts as unchanged. An added, removed or edited fix commit counts as changed.
+- **When they differ,** it builds a fork revision of `B = X.Y.Z`: `X.Y.(Z+1)-fork.N`, where `N` is one more than the highest `X.Y.(Z+1)-fork.N` on npm (`1` if none). For `0.9.0` that is `0.9.1-fork.1`, then `0.9.1-fork.2`. The build uses `B`'s `gitHead` plus every fix commit on `patches`, with the same identity, tests and pack as any version. Only the `version` field in `package.json` changes, at build time.
+- **When they match,** nothing is built.
+- **When the tag is missing,** the run fails with a summary, since it cannot tell what was published. Push the tag by hand (see [When it fails](#when-it-fails)).
+
+A newer upstream version needs no fork revision: its build already applies every fix commit on `patches`.
+
+The bumped patch number places a revision between its base and upstream's next patch release in semver: `0.9.0 < 0.9.1-fork.1 < 0.9.1-fork.2 < 0.9.1`. Updaters that compare versions, such as `pi update`, therefore move through every step. `B` is always the fork's highest stable version, so after upstream jumps to `1.0.0`, the next revision is `1.0.1-fork.1`.
+
 ### Build (per version)
 
 1. Creates a temporary worktree at the version's `gitHead`.
 2. Cherry-picks the fix commits: the commits on `patches` that upstream history does not contain. Commits upstream already has become empty and are dropped (`--empty=drop`). If a release is the one `patches` already sits on, those exact commits are reused. When several versions are built, each one builds on the fix commits rebuilt for the version before it.
-3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs, a fork note in the README and the npm badge. None of this is committed.
+3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs, a fork note in the README and the npm badge (and, for a fork revision, its version). None of this is committed.
 4. Runs `npm ci`, `npm run test:unit`, `npm run typecheck` and `npm pack`.
 
 The artifact holds these files:
@@ -41,10 +55,10 @@ The artifact holds these files:
 
 The artifact comes from the unprivileged job, so `publish` validates all of it before using any of it. Any mismatch rejects the whole publish, with a summary. The checks, per version:
 
-- **Version:** strict semver, not duplicated, and one of the upstream versions npm lists (re-read in this job).
-- **Dist-tag:** `latest` or `backfill` for a stable version, `next` for a prerelease.
+- **Version:** strict semver, not duplicated, and one of the upstream versions npm lists (re-read in this job). A fork revision `X.Y.(Z+1)-fork.N` needs its base `X.Y.Z` to be an upstream version and the fork's highest stable version on npm (re-read in this job).
+- **Dist-tag:** `latest` or `backfill` for a stable version, `next` for a prerelease, and `latest` for a fork revision.
 - **Tarball:** named `viniciosrab-pi-claude-bridge-<version>.tgz`, and a regular file inside the artifact directory. Its `package/package.json`, read with `tar`, must have the fork's name and this version. No package code runs.
-- **Upstream `gitHead`:** must equal npm's `gitHead` for the version.
+- **Upstream `gitHead`:** must equal npm's `gitHead` for the version (for a fork revision, for its base `X.Y.Z`).
 - **Fix commit:** a 40-hex SHA that is the bundle's `refs/mirror-build/<version>`, and a descendant of that `gitHead`.
 
 Checks on the artifact as a whole:
@@ -58,7 +72,8 @@ Once validated:
 - Dist-tags:
   - `latest`: only for a stable version newer than the fork's current `latest`.
   - `backfill`: an older stable version.
-  - `next`: a prerelease. Prereleases never get `latest`.
+  - `next`: a prerelease. Upstream prereleases never get `latest`.
+  - A fork revision always gets `latest`: it is built on the fork's current version. Planning ignores prereleases, so a revision never hides a newer upstream version: after `0.9.1-fork.1`, upstream `0.9.1` is still newer than the fork's highest stable `0.9.0`, is mirrored, and becomes `latest` (it also sorts above `0.9.1-fork.N`).
 - Pushes the last published fix commit to `patches` with `--force-with-lease=refs/heads/patches:<patches-base>`. The lease is the SHA recorded before the build, so a concurrent change to `patches` rejects the push. When the branch did not exist yet, the empty lease requires it to still be absent.
 - Pushes one tag per version, `mirror-v<version>`, pointing at that version's fix commits. Tags do not depend on `patches`, so they are pushed even when the lease rejects the `patches` push.
 - If a publish, or the check for whether a version is already published, fails, it stops at that version. It still pushes `patches` and the tags for the versions already published, then fails with a summary.
@@ -69,7 +84,7 @@ Merges `upstream/main` into `main` with a merge commit, never a rebase. It refus
 
 ### Branches
 
-- `patches`: only the fix commits, on top of the upstream release they were last built on. No CI files.
+- `patches`: only the fix commits, on top of the upstream release they were last built on. No CI files. Pushing a new fix commit here makes the next run publish a fork revision.
 - `main`: upstream `main` + the fix + this workflow, script and doc.
 
 ## One-time setup

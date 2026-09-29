@@ -1,5 +1,6 @@
 # Rebuild every upstream pi-claude-bridge npm release with our fix and publish it
-# as @viniciosrab/pi-claude-bridge. See docs/mirror.md.
+# as @viniciosrab/pi-claude-bridge; publish fix-only changes on `patches` as a
+# X.Y.(Z+1)-fork.<N> revision of upstream X.Y.Z. See docs/mirror.md.
 #
 # Privilege separation: `build` runs upstream code (npm ci scripts, tests, typecheck) with a
 # read-only token that is not persisted. `publish` and `sync-main` can write but run no
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Upstream version to mirror (default all newer than the fork's latest)
+        description: Upstream version to mirror (default all newer than the fork's latest, else a fork revision if patches changed)
         required: false
         type: string
       dry_run:

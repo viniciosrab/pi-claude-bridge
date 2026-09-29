@@ -28,6 +28,9 @@ export interface Config {
 		// Set to false to stop the provider's Claude Code subprocess from loading
 		// user/project/local settings (hooks, plugins, env, apiKeyHelper).
 		loadClaudeSettings?: boolean;
+		// Set to false to hide the Claude rate-limit notices (usage warnings and
+		// "rate limited") shown in pi. Failures are still named as rate limits.
+		rateLimitWarnings?: boolean;
 		pathToClaudeCodeExecutable?: string;
 		// Subscription plan tier. Setting to "max" enables Opus 4.6 at 1M context
 		plan?: "pro" | "max";
@@ -59,6 +62,12 @@ export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMem
  *  `loadClaudeSettings: false` passes an empty list so no settings files are loaded. */
 export function providerSettingSourcesOption(provider: Config["provider"] = {}): { settingSources?: [] } {
 	return provider.loadClaudeSettings === false ? { settingSources: [] } : {};
+}
+
+/** Whether to show the Claude rate-limit notices in pi. Absent keeps them on;
+ *  `rateLimitWarnings: false` hides them. */
+export function rateLimitNoticesEnabled(provider: Config["provider"] = {}): boolean {
+	return provider.rateLimitWarnings !== false;
 }
 
 export function globalConfigPath(): string {
