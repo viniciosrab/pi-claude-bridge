@@ -1,0 +1,223 @@
+# Rebuild every upstream pi-claude-bridge npm release with our fix and publish it
+# as @viniciosrab/pi-claude-bridge. See docs/mirror.md.
+#
+# Privilege separation: `build` runs upstream code (npm ci scripts, tests, typecheck) with a
+# read-only token that is not persisted. `publish` and `sync-main` can write but run no
+# upstream code. `report-failure` can only write issues.
+name: Mirror release
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream version to mirror (default all newer than the fork's latest)
+        required: false
+        type: string
+      dry_run:
+        description: Build and test only; no publish, push, tag or merge
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: mirror-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_PKG: pi-claude-bridge
+  FORK_PKG: '@viniciosrab/pi-claude-bridge'
+  FORK_REPO: ${{ github.repository }}
+  UPSTREAM_URL: https://github.com/elidickinson/pi-claude-bridge.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      count: ${{ steps.meta.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false   # no shared cache between build and publish
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --quiet --no-tags upstream
+
+      - name: Build pending versions
+        env:
+          FAILURE_SUMMARY_FILE: ${{ runner.temp }}/failure/build.md
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          mkdir -p "$(dirname "$FAILURE_SUMMARY_FILE")"
+          args=(build --out "$RUNNER_TEMP/mirror")
+          if [[ -n "$VERSION_INPUT" ]]; then args+=(--version "$VERSION_INPUT"); fi
+          scripts/mirror-release.sh "${args[@]}"
+
+      - name: Count built versions
+        id: meta
+        if: ${{ !cancelled() }}
+        run: |
+          count=0
+          if [[ -f "$RUNNER_TEMP/mirror/manifest.tsv" ]]; then
+            count="$(wc -l <"$RUNNER_TEMP/mirror/manifest.tsv")"
+          fi
+          echo "count=$count" >>"$GITHUB_OUTPUT"
+
+      - name: Upload build
+        if: ${{ !cancelled() && steps.meta.outputs.count != '0' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: mirror-build
+          path: ${{ runner.temp }}/mirror
+          retention-days: 7
+
+      - name: Upload failure summary
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-build
+          path: ${{ runner.temp }}/failure
+          if-no-files-found: ignore
+
+  # Versions built before a failure are still published (oldest first).
+  publish:
+    needs: build
+    if: ${{ !cancelled() && needs.build.outputs.count != '' && needs.build.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push patches and mirror tags
+      id-token: write   # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org   # as in npm's trusted publishing docs
+          package-manager-cache: false
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$(npm --version)"; then
+            npm install -g npm@11
+          fi
+          npm --version
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: mirror-build
+          path: ${{ runner.temp }}/mirror
+
+      # Publishes tarballs and pushes git objects from the bundle; runs no upstream code.
+      - name: Publish and record fix commits
+        env:
+          FAILURE_SUMMARY_FILE: ${{ runner.temp }}/failure/publish.md
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          mkdir -p "$(dirname "$FAILURE_SUMMARY_FILE")"
+          args=(publish --from "$RUNNER_TEMP/mirror")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          scripts/mirror-release.sh "${args[@]}"
+
+      - name: Upload failure summary
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-publish
+          path: ${{ runner.temp }}/failure
+          if-no-files-found: ignore
+
+  # Merge only; runs no upstream code.
+  sync-main:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "$UPSTREAM_URL"
+
+      - name: Merge upstream/main into main
+        env:
+          FAILURE_SUMMARY_FILE: ${{ runner.temp }}/failure/sync-main.md
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          mkdir -p "$(dirname "$FAILURE_SUMMARY_FILE")"
+          args=(sync-main)
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          scripts/mirror-release.sh "${args[@]}"
+
+      - name: Upload failure summary
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-sync-main
+          path: ${{ runner.temp }}/failure
+          if-no-files-found: ignore
+
+  report-failure:
+    needs: [build, publish, sync-main]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Download failure summaries
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: failure-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/failure
+
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title='Mirror release failed'
+          body="$RUNNER_TEMP/issue-body.md"
+          {
+            echo "Mirror workflow failed: $RUN_URL"
+            echo
+            if compgen -G "$RUNNER_TEMP/failure/*.md" >/dev/null; then
+              cat "$RUNNER_TEMP"/failure/*.md
+            else
+              echo 'No failure summary was written; see the run log.'
+            fi
+          } >"$body"
+          number="$(gh issue list --state open --search "in:title \"$title\"" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n1)"
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --body-file "$body"
+          else
+            gh issue create --title "$title" --body-file "$body"
+          fi
