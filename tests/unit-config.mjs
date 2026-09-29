@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, loadConfig, markStartupNoticeShown, providerSettingSourcesOption } from "../src/config.js";
+import { claudeCodeSettings, loadConfig, markStartupNoticeShown, providerSettingSourcesOption, rateLimitNoticesEnabled } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -46,6 +46,21 @@ describe("providerSettingSourcesOption", () => {
 
 	it("disables every setting source when loadClaudeSettings is false", () => {
 		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: false }), { settingSources: [] });
+	});
+});
+
+describe("rateLimitNoticesEnabled", () => {
+	it("shows rate-limit notices by default", () => {
+		assert.equal(rateLimitNoticesEnabled(), true);
+		assert.equal(rateLimitNoticesEnabled({}), true);
+	});
+
+	it("shows rate-limit notices when rateLimitWarnings is true", () => {
+		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: true }), true);
+	});
+
+	it("hides rate-limit notices when rateLimitWarnings is false", () => {
+		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: false }), false);
 	});
 });
 
