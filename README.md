@@ -1,6 +1,8 @@
 # pi-claude-bridge
 
-[![npm version](https://img.shields.io/npm/v/pi-claude-bridge)](https://www.npmjs.com/package/pi-claude-bridge)
+[![npm version](https://img.shields.io/npm/v/@viniciosrab/pi-claude-bridge)](https://www.npmjs.com/package/@viniciosrab/pi-claude-bridge)
+
+> **This is an automated mirror of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by [Eli Dickinson](https://github.com/elidickinson)**, published as [`@viniciosrab/pi-claude-bridge`](https://www.npmjs.com/package/@viniciosrab/pi-claude-bridge). Every upstream release is rebuilt with two additions — [`provider.loadClaudeSettings`](#configuration) and [`provider.rateLimitWarnings`](#configuration) — and published under the same version number; fork-only changes ship as `X.Y.(Z+1)-fork.N`. See [Credits](#credits) and [docs/mirror.md](docs/mirror.md).
 
 Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
 
@@ -18,7 +20,7 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 ## Install
 
 ```
-pi install npm:pi-claude-bridge
+pi install npm:@viniciosrab/pi-claude-bridge
 ```
 
 Requires pi 0.86.1 or newer.
@@ -134,3 +136,15 @@ Requires the following in `~/.pi/agent/subagents.json`:
 **System prompt changes mid-session may not reach the model.** The bridge keeps Claude Code's default prompt recording: project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused on resume. This keeps the cached prefix stable, but later changes may not take effect until a rebuild or compaction. Start a new session if updated instructions must take effect immediately.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.
+
+## Credits
+
+pi-claude-bridge was created by [Eli Dickinson](https://github.com/elidickinson); the original project lives at [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) and on npm as [`pi-claude-bridge`](https://www.npmjs.com/package/pi-claude-bridge). It was originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
+
+This repository is maintained by [viniciosrab](https://github.com/viniciosrab) and adds:
+
+- **`provider.loadClaudeSettings`** — skip Claude Code's user/project/local settings (hooks, plugins, `env`, `apiKeyHelper`) in the provider subprocess. Proposed upstream in [issue #141](https://github.com/elidickinson/pi-claude-bridge/issues/141).
+- **`provider.rateLimitWarnings`** — hide the rate-limit notices shown in pi mid-call.
+- **An automated npm mirror** ([docs/mirror.md](docs/mirror.md)) that republishes every upstream release with these additions.
+
+Licensed under MIT; the original copyright is kept in [LICENSE](LICENSE).
