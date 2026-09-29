@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Mirror upstream pi-claude-bridge npm releases as @viniciosrab/pi-claude-bridge.
+# Mirror upstream pi-claude-bridge npm releases as @viniciosrab/pi-claude-bridge, and publish
+# fork revisions (X.Y.(Z+1)-fork.<N> for upstream X.Y.Z) when only our fix commits changed.
 #
 # Commands:
-#   build --out DIR     For every upstream version still to mirror (oldest first): in a
-#                       temporary worktree at the version's npm gitHead, cherry-pick our fix
-#                       commits, apply the fork identity (build time only), npm ci, unit
-#                       tests, typecheck, npm pack. Writes tarballs, manifest.tsv,
+#   build --out DIR     For every upstream version still to mirror (oldest first), or else a
+#                       fork revision when `patches` changed since the fork's latest publish:
+#                       in a temporary worktree at the upstream version's npm gitHead,
+#                       cherry-pick our fix commits, apply the fork identity (build time only),
+#                       npm ci, unit tests, typecheck, npm pack. Writes tarballs, manifest.tsv,
 #                       patches-base.txt and fixes.bundle to DIR. Stops at the first failure
 #                       (versions built before it stay in DIR).
 #   publish --from DIR  Publish the tarballs built by `build` (never runs package scripts),
@@ -22,6 +24,11 @@
 #
 # What `build` mirrors: --version X if given; else, when the fork has no versions yet, the
 # upstream latest only; else every stable upstream version newer than the fork's latest.
+# When that leaves nothing (and no --version), a fork revision X.Y.(Z+1)-fork.N is built if the
+# fix commits on `patches` differ from those tagged mirror-v<fork latest>, where X.Y.Z is the
+# fork's highest stable version and N is one more than the highest such revision on npm. The
+# bumped patch number sorts the revision above X.Y.Z and below upstream X.Y.(Z+1), so
+# semver-based updaters (pi update) move through it.
 #
 # Environment:
 #   UPSTREAM_PKG          upstream npm package        (default: pi-claude-bridge)
@@ -50,6 +57,10 @@ FAILURE_SUMMARY_FILE="${FAILURE_SUMMARY_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mi
 # Paths the mirror owns on main; an upstream merge must never change them.
 MIRROR_OWNED_PATHS=(.github scripts/mirror-release.sh docs/mirror.md)
 BUILD_REF_PREFIX=refs/mirror-build
+# Private ref for the fix commits the fork's latest version was built from.
+PUBLISHED_REF=refs/mirror-published/latest
+# A fork revision of upstream X.Y.Z: X.Y.(Z+1)-fork.<N>. BASH_REMATCH: 1=X 2=Y 3=Z+1 4=N.
+FORK_VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.([1-9][0-9]*)-fork\.([1-9][0-9]*)$'
 
 DRY_RUN=false
 MODE=release
@@ -168,6 +179,7 @@ upstream_json() {
 #   tag    <version> <current-fork-latest> -> latest | backfill | next
 #   latest-stable <versions-json> -> highest stable version, empty when there is none
 #   json-string <json> -> the (last) string value of a JSON string or array, empty for no input
+#   fork-next <versions-json> <X.Y.Z> -> X.Y.(Z+1)-fork.<N>, N = 1 + the highest existing N (else 1)
 # shellcheck disable=SC2016  # JavaScript template literals, not shell
 SEMVER_JS='
 const parse = (v) => {
@@ -212,6 +224,14 @@ if (cmd === "plan") {
   console.log(!stable(v) ? "next" : !current || cmp(v, current) > 0 ? "latest" : "backfill");
 } else if (cmd === "latest-stable") {
   console.log(maxStable(list(args[0])));
+} else if (cmd === "fork-next") {
+  const [vs, base] = args;
+  const b = parse(base);
+  if (b.pre.length) throw new Error(`fork revision base must be stable: ${base}`);
+  const next = `${b.n[0]}.${b.n[1]}.${b.n[2] + 1}`;
+  const ns = list(vs).map((v) => /^(\d+\.\d+\.\d+)-fork\.([1-9]\d*)$/.exec(v))
+    .filter((m) => m && m[1] === next).map((m) => +m[2]);
+  console.log(`${next}-fork.${Math.max(0, ...ns) + 1}`);
 } else if (cmd === "json-string") {
   const v = list(args[0]); console.log(v.length ? String(v[v.length - 1]) : "");
 } else {
@@ -219,6 +239,27 @@ if (cmd === "plan") {
 }
 '
 semver() { node -e "$SEMVER_JS" "$@"; }
+
+# upstream_version <version>: the upstream version a fork version is built from (itself, or
+# X.Y.Z for a fork revision X.Y.(Z+1)-fork.N).
+upstream_version() {
+  if [[ "$1" =~ $FORK_VERSION_RE ]]; then
+    printf '%s.%s.%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$((BASH_REMATCH[3] - 1))"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# upstream_git_head <upstream version>: npm's gitHead for it; a missing version or gitHead
+# records a summary and exits. Call as: x="$(upstream_git_head V)" || exit 1
+upstream_git_head() {
+  local json rc=0 head
+  json="$(npm_json "$UPSTREAM_PKG@$1" gitHead)" || rc=$?
+  [[ $rc -eq 0 ]] || { [[ $rc -eq 3 ]] && fail "$UPSTREAM_PKG@$1 does not exist"; exit 1; }
+  head="$(semver json-string "$json")"
+  [[ -n "$head" ]] || fail "$UPSTREAM_PKG@$1 has no gitHead in the registry"
+  printf '%s' "$head"
+}
 
 # ---------------------------------------------------------------------------
 # sync-main: merge upstream/main into the fork's main without rewriting history.
@@ -349,13 +390,18 @@ apply_identity() {
   local url="https://github.com/$FORK_REPO" addition='the `provider.loadClaudeSettings` option'
   [[ -z "$UPSTREAM_PR" ]] ||
     addition+=" ([upstream PR #$UPSTREAM_PR](https://github.com/$UPSTREAM_REPO/pull/$UPSTREAM_PR))"
+  # shellcheck disable=SC2016  # literal markdown backticks
+  addition+=' and the `provider.rateLimitWarnings` option'
+  local up_version; up_version="$(upstream_version "$VERSION")"
   (
     cd "$WORKTREE"
     npm pkg set "name=$FORK_PKG" \
       "repository.type=git" "repository.url=git+$url.git" \
       "homepage=$url#readme" "bugs.url=$url/issues"
-    [[ "$(npm pkg get version | tr -d '"')" == "$VERSION" ]] ||
-      fail "package.json version differs from upstream npm version $VERSION"
+    [[ "$(npm pkg get version | tr -d '"')" == "$up_version" ]] ||
+      fail "package.json version differs from upstream npm version $up_version"
+    # A fork revision ships upstream's code at a fork-only version number.
+    [[ "$VERSION" == "$up_version" ]] || npm pkg set "version=$VERSION"
 
     # Point the npm badge at the fork package, then insert the note after the title line.
     sed -i.bak \
@@ -365,7 +411,7 @@ apply_identity() {
     local note
     note="$(cat <<EOF
 
-> **Fork note.** \`$FORK_PKG\` is an automated mirror of [\`$UPSTREAM_PKG\`](https://www.npmjs.com/package/$UPSTREAM_PKG) by Eli Dickinson ([$UPSTREAM_REPO](https://github.com/$UPSTREAM_REPO)), rebuilt for each upstream release with one addition: $addition. Versions match upstream. Licensed MIT; original copyright and credit belong to Eli Dickinson. Fork: [$FORK_REPO]($url).
+> **Fork note.** \`$FORK_PKG\` is an automated mirror of [\`$UPSTREAM_PKG\`](https://www.npmjs.com/package/$UPSTREAM_PKG) by Eli Dickinson ([$UPSTREAM_REPO](https://github.com/$UPSTREAM_REPO)), rebuilt for each upstream release with fork-only additions: $addition. Versions match upstream; a \`X.Y.(Z+1)-fork.N\` version is upstream \`X.Y.Z\` with newer fork-only changes. Licensed MIT; original copyright and credit belong to Eli Dickinson. Fork: [$FORK_REPO]($url).
 EOF
 )"
     awk -v note="$note" 'NR==1 { print; print note; next } { print }' README.md >README.md.tmp
@@ -376,18 +422,15 @@ EOF
 # Build one version in its own worktree. Appends a manifest line and records the rebuilt
 # fix commits under $BUILD_REF_PREFIX/<version>. Runs in a subshell (see build()).
 build_one() {
-  local source="$1" current_latest="$2"
+  local source="$1" current_latest="$2" up_version
+  up_version="$(upstream_version "$VERSION")"
   if [[ -n "$GIT_HEAD_OVERRIDE" ]]; then
     GIT_HEAD="$(git rev-parse --verify "$GIT_HEAD_OVERRIDE^{commit}")" ||
       fail "--git-head $GIT_HEAD_OVERRIDE is not a commit"
   else
-    local json rc=0
-    json="$(npm_json "$UPSTREAM_PKG@$VERSION" gitHead)" || rc=$?
-    [[ $rc -eq 0 ]] || { [[ $rc -eq 3 ]] && fail "$UPSTREAM_PKG@$VERSION does not exist"; exit 1; }
-    GIT_HEAD="$(semver json-string "$json")"
-    [[ -n "$GIT_HEAD" ]] || fail "$UPSTREAM_PKG@$VERSION has no gitHead in the registry"
+    GIT_HEAD="$(upstream_git_head "$up_version")" || exit 1
   fi
-  log "== $UPSTREAM_PKG@$VERSION -> gitHead $GIT_HEAD"
+  log "== $FORK_PKG@$VERSION: $UPSTREAM_PKG@$up_version -> gitHead $GIT_HEAD"
 
   ensure_git_head
   make_worktree "$GIT_HEAD"
@@ -409,11 +452,65 @@ build_one() {
   pack="$(cd "$WORKTREE" && npm pack --json --pack-destination "$OUT_DIR" 2>/dev/null)" ||
     fail "npm pack failed"
   tarball="$(node -e 'console.log(JSON.parse(process.argv[1])[0].filename)' "$pack")"
-  tag="$(semver tag "$VERSION" "$current_latest")"
+  # A fork revision replaces the fork's latest (its base is the fork's highest stable version).
+  if [[ "$VERSION" == "$up_version" ]]; then tag="$(semver tag "$VERSION" "$current_latest")"; else tag=latest; fi
   git update-ref "$BUILD_REF_PREFIX/$VERSION" "$fix_head"
   printf '%s\t%s\t%s\t%s\t%s\n' "$VERSION" "$tag" "$GIT_HEAD" "$fix_head" "$tarball" \
     >>"$OUT_DIR/manifest.tsv"
   log "built $tarball (dist-tag $tag, fix commits ${fix_head:0:7})"
+}
+
+# fix_patch_ids <ref> <upstream-commit>: the patch-ids of the fix commits on <ref> (commits
+# outside upstream history and <upstream-commit>), oldest first. Patch-ids ignore the base, so
+# a rebased but otherwise identical fix compares equal.
+fix_patch_ids() {
+  git log --reverse --no-merges -p "$1" --not --remotes="$UPSTREAM_REMOTE" "$2" |
+    git patch-id --stable | cut -d' ' -f1
+}
+
+# plan_fork_revision <fork-versions-json> <fork highest stable B>: print B's next fork revision
+# (see fork-next) when the fix
+# commits on $PATCHES_REF differ from those of the fork's latest publish (tag
+# mirror-v<dist-tags.latest>); print nothing when they match. Run in a command substitution:
+# x="$(plan_fork_revision ...)" || exit 1
+plan_fork_revision() {
+  local fork_json="$1" base="$2" json rc=0 latest tag published
+  [[ -n "$base" ]] || return 0
+  json="$(npm_json "$FORK_PKG" dist-tags.latest)" || rc=$?
+  [[ $rc -eq 0 ]] || { [[ $rc -eq 3 ]] && fail "$FORK_PKG has versions but no dist-tags.latest"; exit 1; }
+  latest="$(semver json-string "$json")"
+  # latest is B or a fork revision of B; anything else means dist-tags were changed by hand.
+  [[ "$(upstream_version "$latest")" == "$base" ]] ||
+    fail "Fork dist-tag latest '$latest' is neither $base nor a fork revision of it"
+
+  # The fix commits $latest was built from: the tag the publish step recorded for it.
+  # Only a tag missing on the remote falls back to a local tag; any other fetch failure
+  # (network, auth) fails the run with git's own error.
+  tag="mirror-v$latest"
+  local out
+  if ! out="$(LC_ALL=C git fetch --quiet --no-tags "$FORK_REMOTE" "+refs/tags/$tag:$PUBLISHED_REF" 2>&1)"; then
+    grep -qi "couldn't find remote ref" <<<"$out" ||
+      fail "Fetching tag $tag from $FORK_REMOTE failed" "$out"
+    log "tag $tag not on $FORK_REMOTE; trying the local tag"
+  fi
+  published="$(git rev-parse --verify --quiet "$PUBLISHED_REF^{commit}" ||
+    git rev-parse --verify --quiet "refs/tags/$tag^{commit}")" ||
+    fail "Tag $tag not found; cannot tell which fix commits $FORK_PKG@$latest contains" \
+      "Push the tag (see docs/mirror.md, 'Published, but pushing patches or a tag failed')."
+  git update-ref -d "$PUBLISHED_REF" 2>/dev/null || true
+
+  GIT_HEAD="$(upstream_git_head "$base")" || exit 1
+  ensure_git_head
+  local have want
+  have="$(fix_patch_ids "$published" "$GIT_HEAD")"
+  want="$(fix_patch_ids "$PATCHES_REF" "$GIT_HEAD")"
+  if [[ "$have" == "$want" ]]; then
+    log "fix commits on $PATCHES_REF match $FORK_PKG@$latest (${published:0:7}); no fork revision"
+    return 0
+  fi
+  local next; next="$(semver fork-next "$fork_json" "$base")" || fail "Planning the fork revision failed"
+  log "fix commits on $PATCHES_REF differ from $FORK_PKG@$latest (${published:0:7}); fork revision $next"
+  printf '%s\n' "$next"
 }
 
 build() {
@@ -449,6 +546,12 @@ build() {
   rm -f "$plan_err"
   local -a versions=()
   [[ -z "$plan_out" ]] || mapfile -t versions <<<"$plan_out"
+  # No upstream release to mirror: publish fix-only changes as a fork revision of the fork's
+  # current version. A newer upstream release already carries every fix commit.
+  if [[ ${#versions[@]} -eq 0 && -z "$VERSION" ]]; then
+    plan_out="$(plan_fork_revision "$fork_json" "$current_latest")" || exit 1
+    [[ -z "$plan_out" ]] || versions=("$plan_out")
+  fi
   if [[ ${#versions[@]} -eq 0 ]]; then
     log "nothing to mirror (fork latest stable: ${current_latest:-none}, upstream latest: $up_latest)"
     return 0
@@ -500,7 +603,13 @@ validate_artifact() {
   done <<<"$heads"
 
   up_json="$(upstream_json versions)"
-  local version tag git_head fix tarball extra seen=" "
+  # A fork revision must build on the fork's current highest stable version (re-read here).
+  local fork_json fork_stable rc=0
+  fork_json="$(npm_json "$FORK_PKG" versions)" || rc=$?
+  [[ $rc -eq 0 || $rc -eq 3 ]] || exit 1
+  [[ $rc -eq 0 ]] || fork_json=""
+  fork_stable="$(semver latest-stable "$fork_json")"
+  local version up_version tag git_head fix tarball extra seen=" "
   while IFS=$'\t' read -r -u 4 version tag git_head fix tarball extra; do
     line="$version $tag ${git_head:0:12} ${fix:0:12} $tarball"
     [[ -z "$extra" ]] || fail "Artifact rejected: malformed manifest line" "$line"
@@ -508,13 +617,22 @@ validate_artifact() {
       fail "Artifact rejected: '$version' is not a strict semver version"
     [[ "$seen" != *" $version "* ]] || fail "Artifact rejected: duplicate version $version"
     seen+="$version "
+    up_version="$(upstream_version "$version")"
     node -e 'process.exit(JSON.parse(process.argv[1]).includes(process.argv[2]) ? 0 : 1)' \
-      "$up_json" "$version" || fail "Artifact rejected: $UPSTREAM_PKG@$version does not exist upstream"
-    case "$tag" in
-      next) [[ "$version" == *-* ]] || fail "Artifact rejected: stable $version tagged next" ;;
-      latest|backfill) [[ "$version" != *-* ]] || fail "Artifact rejected: prerelease $version tagged $tag" ;;
-      *) fail "Artifact rejected: dist-tag '$tag' for $version" ;;
-    esac
+      "$up_json" "$up_version" || fail "Artifact rejected: $UPSTREAM_PKG@$up_version does not exist upstream"
+    if [[ "$version" != "$up_version" ]]; then
+      # Fork revision of B: B already mirrored and the fork's highest stable version,
+      # and it replaces the fork's latest.
+      [[ -n "$fork_stable" && "$up_version" == "$fork_stable" ]] ||
+        fail "Artifact rejected: fork revision $version is not based on the fork's latest stable version (${fork_stable:-none})"
+      [[ "$tag" == latest ]] || fail "Artifact rejected: fork revision $version tagged $tag, not latest"
+    else
+      case "$tag" in
+        next) [[ "$version" == *-* ]] || fail "Artifact rejected: stable $version tagged next" ;;
+        latest|backfill) [[ "$version" != *-* ]] || fail "Artifact rejected: prerelease $version tagged $tag" ;;
+        *) fail "Artifact rejected: dist-tag '$tag' for $version" ;;
+      esac
+    fi
 
     # Tarball: expected name, a regular file inside DIR, and a package.json that matches.
     [[ "$tarball" == "$pack_prefix-$version.tgz" ]] ||
@@ -537,8 +655,8 @@ validate_artifact() {
     grep -Fqx "$fix $BUILD_REF_PREFIX/$version" <<<"$heads" ||
       fail "Artifact rejected: $fix is not $BUILD_REF_PREFIX/$version in fixes.bundle"
     if [[ -z "$GIT_HEAD_OVERRIDE" ]]; then
-      local npm_head rc=0
-      npm_head="$(npm_json "$UPSTREAM_PKG@$version" gitHead)" || rc=$?
+      local npm_head; rc=0
+      npm_head="$(npm_json "$UPSTREAM_PKG@$up_version" gitHead)" || rc=$?
       [[ $rc -eq 0 ]] || exit 1
       [[ "$(semver json-string "$npm_head")" == "$git_head" ]] ||
         fail "Artifact rejected: gitHead for $version differs from npm" "$line"
