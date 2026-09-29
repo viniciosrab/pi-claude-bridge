@@ -90,6 +90,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `loadClaudeSettings` — load Claude Code's user/project/local settings in the provider's Claude Code subprocess (default `true`). Set `false` to skip them: settings-sourced hooks and plugins no longer run on every turn, which can noticeably cut tokens and latency when you have many configured. It also drops settings-sourced `env` and `apiKeyHelper`, so keep the default if you rely on those (e.g. Bedrock/Vertex setup in `settings.json`). OAuth login, pi tools and extensions are unaffected. Applies only to the provider path; AskClaude always loads settings.
+- `rateLimitWarnings` — show Claude rate-limit notices in pi (default `true`): a usage warning at each 5% step once Claude Code reports `allowed_warning`, and a "rate limited" notice with the reset time when a request is rejected. Set `false` to hide both. A rejected request's failure is still named as a rate limit (so fallback chains keep working).
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
 
 
