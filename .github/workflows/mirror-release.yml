@@ -1,0 +1,107 @@
+# Rebuild every upstream pi-claude-bridge npm release with our fix and publish it
+# as @viniciosrab/pi-claude-bridge. See docs/mirror.md.
+name: Mirror release
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Upstream version to build (default latest)
+        required: false
+        type: string
+      dry_run:
+        description: Build and test only; no publish, push, tag or merge
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # push patches branch, mirror tags, and merged main
+  id-token: write   # npm Trusted Publishing (OIDC) and provenance
+  issues: write     # open/update the failure issue
+
+concurrency:
+  group: mirror-release
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # scripts/mirror-release.sh appends failure summaries to $RUNNER_TEMP/mirror-failure.md.
+    env:
+      UPSTREAM_PKG: pi-claude-bridge
+      FORK_PKG: '@viniciosrab/pi-claude-bridge'
+      FORK_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$(npm --version)"; then
+            npm install -g npm@11
+          fi
+          npm --version
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/elidickinson/pi-claude-bridge.git
+          git fetch --quiet --no-tags upstream
+
+      - name: Mirror upstream release
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          [[ "$DRY_RUN" == true ]] && args+=(--dry-run)
+          [[ -n "$VERSION_INPUT" ]] && args+=(--version "$VERSION_INPUT")
+          scripts/mirror-release.sh "${args[@]}"
+
+      - name: Sync main with upstream
+        if: ${{ !cancelled() }}
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--sync-main)
+          [[ "$DRY_RUN" == true ]] && args+=(--dry-run)
+          scripts/mirror-release.sh "${args[@]}"
+
+      - name: Open or update failure issue
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title='Mirror release failed'
+          body="$RUNNER_TEMP/issue-body.md"
+          {
+            echo "Mirror workflow failed: $RUN_URL"
+            echo
+            if [[ -s "$RUNNER_TEMP/mirror-failure.md" ]]; then
+              cat "$RUNNER_TEMP/mirror-failure.md"
+            else
+              echo 'No failure summary was written; see the run log.'
+            fi
+          } >"$body"
+          number="$(gh issue list --state open --search "in:title \"$title\"" \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n1)"
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --body-file "$body"
+          else
+            gh issue create --title "$title" --body-file "$body"
+          fi
