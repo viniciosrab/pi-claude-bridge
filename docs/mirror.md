@@ -16,7 +16,7 @@ The workflow [`.github/workflows/mirror-release.yml`](../.github/workflows/mirro
 ### Which versions are mirrored
 
 - If the fork already has versions: every stable upstream version newer than the fork's `latest`, oldest first. The run stops at the first failure, so the issue names the blocked version. Versions built before the failure are still published.
-- If the fork has no versions yet: only the upstream `latest`. History is not backfilled.
+- If the fork has no stable version yet (no versions, or prereleases only): only the upstream `latest`. History is not backfilled.
 - With `--version X` (or the workflow's `version` input): only `X`.
 
 Each version is read from npm along with its `gitHead`. Upstream does not use GitHub Releases, so npm is the source of truth.
@@ -39,13 +39,29 @@ The artifact holds these files:
 
 ### Publish
 
+The artifact comes from the unprivileged job, so `publish` validates all of it before using any of it. Any mismatch rejects the whole publish, with a summary. The checks, per version:
+
+- **Version:** strict semver, not duplicated, and one of the upstream versions npm lists (re-read in this job).
+- **Dist-tag:** `latest` or `backfill` for a stable version, `next` for a prerelease.
+- **Tarball:** named `viniciosrab-pi-claude-bridge-<version>.tgz`, and a regular file inside the artifact directory. Its `package/package.json`, read with `tar`, must have the fork's name and this version. No package code runs.
+- **Upstream `gitHead`:** must equal npm's `gitHead` for the version.
+- **Fix commit:** a 40-hex SHA that is the bundle's `refs/mirror-build/<version>`, and a descendant of that `gitHead`.
+
+Checks on the artifact as a whole:
+
+- **`patches-base`:** a 40-hex SHA, or empty.
+- **The bundle:** it must verify and may only carry `refs/mirror-build/*` refs. Only those refs are fetched from it.
+
+Once validated:
+
 - Each tarball goes out with `npm publish <tarball> --provenance --access public --tag <tag> --ignore-scripts`. npm runs no lifecycle scripts when publishing a tarball (it only runs them for directory publishes), and `--ignore-scripts` makes that explicit. Versions that are already published are skipped.
 - Dist-tags:
   - `latest`: only for a stable version newer than the fork's current `latest`.
   - `backfill`: an older stable version.
   - `next`: a prerelease. Prereleases never get `latest`.
 - Pushes the last published fix commit to `patches` with `--force-with-lease=refs/heads/patches:<patches-base>`. The lease is the SHA recorded before the build, so a concurrent change to `patches` rejects the push. When the branch did not exist yet, the empty lease requires it to still be absent.
-- Pushes one tag per version, `mirror-v<version>`, pointing at that version's fix commits.
+- Pushes one tag per version, `mirror-v<version>`, pointing at that version's fix commits. Tags do not depend on `patches`, so they are pushed even when the lease rejects the `patches` push.
+- If a publish, or the check for whether a version is already published, fails, it stops at that version. It still pushes `patches` and the tags for the versions already published, then fails with a summary.
 
 ### Sync main
 
