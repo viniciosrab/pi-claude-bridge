@@ -152,12 +152,22 @@ npm_json() {
   fail "npm view $* failed" "$msg"
 }
 
+# upstream_json <field>: npm_json for the upstream package; a missing package is an error
+# with a summary, never a silent exit.
+upstream_json() {
+  local out rc=0
+  out="$(npm_json "$UPSTREAM_PKG" "$1")" || rc=$?
+  [[ $rc -eq 0 ]] || { [[ $rc -eq 3 ]] && fail "npm view $UPSTREAM_PKG $1: package not found (E404)"; exit 1; }
+  printf '%s' "$out"
+}
+
 # Semver and planning logic, kept in one small node program (node is present wherever npm is).
 # Commands:
 #   plan   <upstream-versions-json> <fork-versions-json> <upstream-latest> [explicit]
 #          -> versions to mirror, oldest first, one per line
 #   tag    <version> <current-fork-latest> -> latest | backfill | next
-#   scalar <json>  -> the JSON string value (empty for empty input)
+#   latest-stable <versions-json> -> highest stable version, empty when there is none
+#   json-string <json> -> the (last) string value of a JSON string or array, empty for no input
 # shellcheck disable=SC2016  # JavaScript template literals, not shell
 SEMVER_JS='
 const parse = (v) => {
@@ -192,13 +202,17 @@ if (cmd === "plan") {
   const up = list(upJson), fork = list(forkJson), forkLatest = maxStable(fork);
   let out;
   if (explicit) out = [explicit];
-  else if (!fork.length) out = upLatest ? [upLatest] : [];
+  // No stable fork version yet (none at all, or prereleases only): upstream latest only,
+  // never a backfill of all history.
+  else if (!forkLatest) out = upLatest ? [upLatest] : [];
   else out = up.filter((v) => stable(v) && cmp(v, forkLatest) > 0).sort(cmp);
   for (const v of out) if (!fork.includes(v)) console.log(v);
 } else if (cmd === "tag") {
   const [v, current] = args;
   console.log(!stable(v) ? "next" : !current || cmp(v, current) > 0 ? "latest" : "backfill");
-} else if (cmd === "scalar") {
+} else if (cmd === "latest-stable") {
+  console.log(maxStable(list(args[0])));
+} else if (cmd === "json-string") {
   const v = list(args[0]); console.log(v.length ? String(v[v.length - 1]) : "");
 } else {
   throw new Error(`unknown command ${cmd}`);
@@ -370,7 +384,7 @@ build_one() {
     local json rc=0
     json="$(npm_json "$UPSTREAM_PKG@$VERSION" gitHead)" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 3 ]] && fail "$UPSTREAM_PKG@$VERSION does not exist"; exit 1; }
-    GIT_HEAD="$(semver scalar "$json")"
+    GIT_HEAD="$(semver json-string "$json")"
     [[ -n "$GIT_HEAD" ]] || fail "$UPSTREAM_PKG@$VERSION has no gitHead in the registry"
   fi
   log "== $UPSTREAM_PKG@$VERSION -> gitHead $GIT_HEAD"
@@ -417,23 +431,26 @@ build() {
   resolve_patches_ref
 
   # Decide what to mirror.
-  local up_json fork_json latest_json up_latest rc=0
-  up_json="$(npm_json "$UPSTREAM_PKG" versions)" || exit 1
-  latest_json="$(npm_json "$UPSTREAM_PKG" dist-tags.latest)" || exit 1
-  up_latest="$(semver scalar "$latest_json")"
+  local up_json fork_json latest_json up_latest current_latest rc=0
+  up_json="$(upstream_json versions)"
+  latest_json="$(upstream_json dist-tags.latest)"
+  up_latest="$(semver json-string "$latest_json")"
   fork_json="$(npm_json "$FORK_PKG" versions)" || rc=$?
   [[ $rc -eq 0 || $rc -eq 3 ]] || exit 1
   [[ $rc -eq 0 ]] || fork_json=""
-  local current_latest=""
-  rc=0; latest_json="$(npm_json "$FORK_PKG" dist-tags.latest)" || rc=$?
-  [[ $rc -eq 0 || $rc -eq 3 ]] || exit 1
-  [[ $rc -ne 0 ]] || current_latest="$(semver scalar "$latest_json")"
+  # The fork's current latest is its highest stable version (none if it has only prereleases).
+  current_latest="$(semver latest-stable "$fork_json")"
   [[ -z "$GIT_HEAD_OVERRIDE" || -n "$VERSION" ]] || fail "--git-head requires --version"
 
-  local -a versions
-  mapfile -t versions < <(semver plan "$up_json" "$fork_json" "$up_latest" "$VERSION")
+  # Checked substitution: a planner crash must fail the run, not look like "nothing to do".
+  local plan_out plan_err; plan_err="$(mktemp)"
+  plan_out="$(semver plan "$up_json" "$fork_json" "$up_latest" "$VERSION" 2>"$plan_err")" ||
+    fail "Planning the versions to mirror failed" "$(cat "$plan_err")"
+  rm -f "$plan_err"
+  local -a versions=()
+  [[ -z "$plan_out" ]] || mapfile -t versions <<<"$plan_out"
   if [[ ${#versions[@]} -eq 0 ]]; then
-    log "nothing to mirror (fork latest: ${current_latest:-none}, upstream latest: $up_latest)"
+    log "nothing to mirror (fork latest stable: ${current_latest:-none}, upstream latest: $up_latest)"
     return 0
   fi
   log "to mirror, oldest first: ${versions[*]} (fork latest: ${current_latest:-none})"
@@ -466,13 +483,89 @@ build() {
 # ---------------------------------------------------------------------------
 # publish: tarballs + git bundle only; never runs upstream code.
 # ---------------------------------------------------------------------------
+# The build artifact comes from an unprivileged job: check everything in it against npm and
+# git before the privileged publish uses any of it. Any mismatch rejects the whole publish.
+validate_artifact() {
+  local dir="$1" base="$2" pack_prefix up_json heads line
+  pack_prefix="$(printf '%s' "${FORK_PKG#@}" | tr '/' '-')"
+  [[ -z "$base" || "$base" =~ ^[0-9a-f]{40}$ ]] || fail "Artifact rejected: bad patches-base '$base'"
+
+  # The bundle may only carry refs/mirror-build/<version> heads.
+  git bundle verify --quiet "$dir/fixes.bundle" >/dev/null 2>&1 ||
+    fail "Artifact rejected: fixes.bundle does not verify"
+  heads="$(git bundle list-heads "$dir/fixes.bundle")"
+  while read -r _ ref; do
+    [[ "$ref" =~ ^$BUILD_REF_PREFIX/[0-9A-Za-z.+-]+$ ]] ||
+      fail "Artifact rejected: unexpected ref '$ref' in fixes.bundle"
+  done <<<"$heads"
+
+  up_json="$(upstream_json versions)"
+  local version tag git_head fix tarball extra seen=" "
+  while IFS=$'\t' read -r -u 4 version tag git_head fix tarball extra; do
+    line="$version $tag ${git_head:0:12} ${fix:0:12} $tarball"
+    [[ -z "$extra" ]] || fail "Artifact rejected: malformed manifest line" "$line"
+    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
+      fail "Artifact rejected: '$version' is not a strict semver version"
+    [[ "$seen" != *" $version "* ]] || fail "Artifact rejected: duplicate version $version"
+    seen+="$version "
+    node -e 'process.exit(JSON.parse(process.argv[1]).includes(process.argv[2]) ? 0 : 1)' \
+      "$up_json" "$version" || fail "Artifact rejected: $UPSTREAM_PKG@$version does not exist upstream"
+    case "$tag" in
+      next) [[ "$version" == *-* ]] || fail "Artifact rejected: stable $version tagged next" ;;
+      latest|backfill) [[ "$version" != *-* ]] || fail "Artifact rejected: prerelease $version tagged $tag" ;;
+      *) fail "Artifact rejected: dist-tag '$tag' for $version" ;;
+    esac
+
+    # Tarball: expected name, a regular file inside DIR, and a package.json that matches.
+    [[ "$tarball" == "$pack_prefix-$version.tgz" ]] ||
+      fail "Artifact rejected: tarball '$tarball' is not $pack_prefix-$version.tgz"
+    [[ -f "$dir/$tarball" && ! -L "$dir/$tarball" ]] ||
+      fail "Artifact rejected: $tarball is not a regular file"
+    local pkg
+    pkg="$(tar -xOzf "$dir/$tarball" package/package.json 2>/dev/null)" ||
+      fail "Artifact rejected: $tarball has no package/package.json"
+    node -e '
+      const p = JSON.parse(process.argv[1]);
+      process.exit(p.name === process.argv[2] && p.version === process.argv[3] ? 0 : 1);
+    ' "$pkg" "$FORK_PKG" "$version" ||
+      fail "Artifact rejected: $tarball is not $FORK_PKG@$version"
+
+    # Git: the fix commit is this version's bundle head and descends from the upstream
+    # gitHead, which must be npm's gitHead for the version (unless built with --git-head).
+    [[ "$git_head" =~ ^[0-9a-f]{40}$ && "$fix" =~ ^[0-9a-f]{40}$ ]] ||
+      fail "Artifact rejected: bad commit ids for $version" "$line"
+    grep -Fqx "$fix $BUILD_REF_PREFIX/$version" <<<"$heads" ||
+      fail "Artifact rejected: $fix is not $BUILD_REF_PREFIX/$version in fixes.bundle"
+    if [[ -z "$GIT_HEAD_OVERRIDE" ]]; then
+      local npm_head rc=0
+      npm_head="$(npm_json "$UPSTREAM_PKG@$version" gitHead)" || rc=$?
+      [[ $rc -eq 0 ]] || exit 1
+      [[ "$(semver json-string "$npm_head")" == "$git_head" ]] ||
+        fail "Artifact rejected: gitHead for $version differs from npm" "$line"
+    fi
+  done 4<"$dir/manifest.tsv"
+
+  # Only now import the commits (only refs/mirror-build/*) and check their ancestry.
+  run_or_fail "Reading fixes.bundle failed" \
+    git fetch --quiet --no-tags "$dir/fixes.bundle" "+$BUILD_REF_PREFIX/*:$BUILD_REF_PREFIX/*"
+  while IFS=$'\t' read -r -u 4 version tag git_head fix tarball; do
+    if ! git cat-file -e "${git_head}^{commit}" 2>/dev/null ||
+       ! git merge-base --is-ancestor "$git_head" "$fix"; then
+      fail "Artifact rejected: fix commit for $version does not descend from gitHead $git_head"
+    fi
+  done 4<"$dir/manifest.tsv"
+  log "artifact validated: $(wc -l <"$dir/manifest.tsv") version(s)"
+}
+
+# ---------------------------------------------------------------------------
+# publish: validated tarballs + git bundle only; never runs upstream code.
+# ---------------------------------------------------------------------------
 publish() {
   [[ -n "$FROM_DIR" && -f "$FROM_DIR/manifest.tsv" ]] || fail "publish needs --from DIR with manifest.tsv"
   if [[ ! -s "$FROM_DIR/manifest.tsv" ]]; then log "nothing to publish"; return 0; fi
   local base; base="$(cat "$FROM_DIR/patches-base.txt" 2>/dev/null || true)"
   trap 'cleanup; drop_build_refs' EXIT
-  run_or_fail "Reading fixes.bundle failed" \
-    git fetch --quiet "$FROM_DIR/fixes.bundle" "+$BUILD_REF_PREFIX/*:$BUILD_REF_PREFIX/*"
+  validate_artifact "$FROM_DIR" "$base"
 
   local -a args
   read -r -a args <<<"$NPM_PUBLISH_ARGS"
@@ -483,14 +576,15 @@ publish() {
     args=(--dry-run "${keep[@]}")
   fi
 
-  local version tag git_head fix tarball last_fix="" error="" rc out
-  local -a done_versions=() done_fixes=()
+  # Publish oldest first. On any error, stop, but still record the versions published so far.
+  local version tag git_head fix tarball last_fix="" rc out
+  local -a done_versions=() done_fixes=() errors=()
   while IFS=$'\t' read -r -u 3 version tag git_head fix tarball; do
     VERSION="$version"; GIT_HEAD="$git_head"
     # Published only when npm answers with this exact version: some npm versions exit 0
     # with empty output when the package exists but the version does not.
     rc=0; out="$(npm_json "$FORK_PKG@$version" version)" || rc=$?
-    if [[ $rc -eq 0 && "$(semver scalar "$out")" == "$version" ]]; then
+    if [[ $rc -eq 0 && "$(semver json-string "$out")" == "$version" ]]; then
       log "$FORK_PKG@$version already published; skipping npm publish"
     elif [[ $rc -eq 0 || $rc -eq 3 ]]; then
       # Publishing a tarball runs no package lifecycle scripts (npm only runs them for
@@ -498,16 +592,20 @@ publish() {
       log "\$ npm publish $tarball --tag $tag --ignore-scripts ${args[*]}"
       if ! out="$(npm publish "$FROM_DIR/$tarball" --tag "$tag" --ignore-scripts "${args[@]}" 2>&1 </dev/null)"; then
         printf '%s\n' "$out" >&2
-        error="$(printf '%s\n' "$out" | tail -n 60)"; break
+        errors+=("npm publish $FORK_PKG@$version failed:"$'\n'"$(printf '%s\n' "$out" | tail -n 60)")
+        break
       fi
       printf '%s\n' "$out" >&2
     else
-      exit 1
+      # npm_json already appended the npm error to the summary.
+      errors+=("Could not check whether $FORK_PKG@$version is published (npm view failed); stopped before it.")
+      break
     fi
     last_fix="$fix"; done_versions+=("$version"); done_fixes+=("$fix")
   done 3<"$FROM_DIR/manifest.tsv"
 
   # Record what was published: patches -> last published fix commits, one tag per version.
+  # Tags do not depend on patches, so they are pushed even if the patches lease is rejected.
   if [[ -n "$last_fix" ]]; then
     if $DRY_RUN; then
       log "dry run: would push ${last_fix:0:7} to $FORK_REMOTE/patches (lease: ${base:-absent})"
@@ -515,15 +613,22 @@ publish() {
         log "dry run: would push tag mirror-v${done_versions[$i]} -> ${done_fixes[$i]:0:7}"
       done
     else
-      run_or_fail "Published, but pushing the patches branch failed" \
-        git push --force-with-lease="refs/heads/patches:$base" "$FORK_REMOTE" "$last_fix:refs/heads/patches"
+      log "\$ git push --force-with-lease=refs/heads/patches:${base} $FORK_REMOTE ${last_fix}:refs/heads/patches"
+      out="$(git push --force-with-lease="refs/heads/patches:$base" "$FORK_REMOTE" \
+        "$last_fix:refs/heads/patches" 2>&1)" || errors+=("Pushing patches failed:"$'\n'"$out")
+      printf '%s\n' "$out" >&2
       for i in "${!done_versions[@]}"; do
-        run_or_fail "Published, but pushing tag mirror-v${done_versions[$i]} failed" \
-          git push "$FORK_REMOTE" "${done_fixes[$i]}:refs/tags/mirror-v${done_versions[$i]}"
+        log "\$ git push $FORK_REMOTE ${done_fixes[$i]}:refs/tags/mirror-v${done_versions[$i]}"
+        out="$(git push "$FORK_REMOTE" "${done_fixes[$i]}:refs/tags/mirror-v${done_versions[$i]}" 2>&1)" ||
+          errors+=("Pushing tag mirror-v${done_versions[$i]} failed:"$'\n'"$out")
+        printf '%s\n' "$out" >&2
       done
     fi
   fi
-  [[ -z "$error" ]] || fail "npm publish failed" "$error"
+  if [[ ${#errors[@]} -gt 0 ]]; then
+    VERSION=""; GIT_HEAD=""
+    fail "Publish incomplete (published: ${done_versions[*]:-none})" "$(printf '%s\n\n' "${errors[@]}")"
+  fi
 }
 
 case "$MODE" in
