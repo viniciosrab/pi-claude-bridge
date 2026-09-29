@@ -487,10 +487,12 @@ publish() {
   local -a done_versions=() done_fixes=()
   while IFS=$'\t' read -r -u 3 version tag git_head fix tarball; do
     VERSION="$version"; GIT_HEAD="$git_head"
-    rc=0; npm_json "$FORK_PKG@$version" version >/dev/null || rc=$?
-    if [[ $rc -eq 0 ]]; then
+    # Published only when npm answers with this exact version: some npm versions exit 0
+    # with empty output when the package exists but the version does not.
+    rc=0; out="$(npm_json "$FORK_PKG@$version" version)" || rc=$?
+    if [[ $rc -eq 0 && "$(semver scalar "$out")" == "$version" ]]; then
       log "$FORK_PKG@$version already published; skipping npm publish"
-    elif [[ $rc -eq 3 ]]; then
+    elif [[ $rc -eq 0 || $rc -eq 3 ]]; then
       # Publishing a tarball runs no package lifecycle scripts (npm only runs them for
       # directory publishes); --ignore-scripts makes that explicit.
       log "\$ npm publish $tarball --tag $tag --ignore-scripts ${args[*]}"
