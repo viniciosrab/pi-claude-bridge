@@ -49,9 +49,15 @@ const RECORD_STREAM_PATH = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 //   out of a pi session, which serves its own tools.
 // - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
 //   diverge from pi's history, which is the source of truth for every rebuild.
+// - CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: CC truncates each MCP tool description to
+//   2,048 chars. Pi tools reach CC as MCP tools and pi already budgets their descriptions
+//   (codemode.inlineBudget); the cap cut codemode's nested-tool listing, hiding every
+//   codemode-exposed MCP server from Claude (issue #4). Overrides a user-set value on
+//   purpose, since a lower limit brings the bug back.
 const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
+	CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "1000000",
 } as const;
 
 // Pi owns context files on the provider path, so Claude Code must not load its
