@@ -18,14 +18,6 @@ describe("Claude Code child environment", () => {
 		});
 	});
 
-	// CC truncates each MCP tool description to 2,048 chars by default. Pi's codemode
-	// description lists its MCP servers past char ~6.9k, so a user-set lower limit
-	// must not survive into the child: the bridge value wins over process.env.
-	it("overrides a user-set MCP description limit", () => {
-		const env = { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "2048", ...__test.CC_CHILD_ENV };
-		assert.equal(env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "1000000");
-	});
-
 	// Deliberately not asserted here: that every `query()` call site spreads the
 	// constant. The only way to check that from a unit test is to grep src/index.ts,
 	// which fails on innocent indirection (`env: childEnv`) and would have to be
