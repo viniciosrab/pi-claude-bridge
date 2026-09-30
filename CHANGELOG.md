@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Fix: codemode MCP servers visible to Claude (issue #4)** — Claude Code truncates every MCP tool description to 2,048 characters, and pi 0.99's `codemode` description lists its MCP servers only after ~6.9k, so Claude never saw them and fell back to probing or shelling out. Every Claude Code child now runs with `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=1000000`, overriding any lower user value.
 - **Bump: Claude Sonnet 5.5** — Should appear in `/model` with 1M context once pi-ai ships the new catalog entry. Agent SDK bumped to ^0.3.284 (Claude Code 2.1.284).
 
 ## 0.9.0 — 2026-09-27
