@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: codemode MCP servers visible to Claude (issue #4)** — Claude Code truncates every MCP tool description to 2,048 characters, and pi 0.99's `codemode` description lists its MCP servers only after ~6.9k, so Claude never saw them and fell back to probing or shelling out. Every Claude Code child now runs with `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=1000000`, overriding any lower user value.
+
 ## 0.9.0 — 2026-09-27
 
 - **Bump: require pi ≥0.86.1 and drop pre-0.86 compat** — This breaks support for pi <0.86.1. Use pi-ai's transcript helpers and update dev peers to `^0.87.1` and the Agent SDK to `^0.3.280`; the API now rejects older Claude Code clients.
