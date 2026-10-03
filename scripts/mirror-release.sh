@@ -56,6 +56,9 @@ NPM_PUBLISH_ARGS="${NPM_PUBLISH_ARGS:---provenance --access public}"
 FAILURE_SUMMARY_FILE="${FAILURE_SUMMARY_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mirror-failure.md}"
 # Paths the mirror owns on main; an upstream merge must never change them.
 MIRROR_OWNED_PATHS=(.github scripts/mirror-release.sh docs/mirror.md)
+# Paths upstream owns: a conflict confined to them resolves to upstream's side. Fix commits
+# add `## UNRELEASED` changelog entries that every upstream release rewrites.
+UPSTREAM_OWNED_PATHS=(CHANGELOG.md)
 BUILD_REF_PREFIX=refs/mirror-build
 # Private ref for the fix commits the fork's latest version was built from.
 PUBLISHED_REF=refs/mirror-published/latest
@@ -261,6 +264,33 @@ upstream_git_head() {
   printf '%s' "$head"
 }
 
+# Resolve a stopped merge or cherry-pick in $WORKTREE when every conflicting path is
+# upstream-owned, taking SIDE (--ours or --theirs). Returns 1, touching nothing, otherwise.
+resolve_upstream_owned_conflicts() {
+  local side="$1" conflicts path owned
+  mapfile -t conflicts < <(git -C "$WORKTREE" diff --name-only --diff-filter=U)
+  [[ ${#conflicts[@]} -gt 0 ]] || return 1
+  for path in "${conflicts[@]}"; do
+    for owned in "${UPSTREAM_OWNED_PATHS[@]}"; do
+      [[ "$path" == "$owned" ]] && continue 2
+    done
+    return 1
+  done
+  git -C "$WORKTREE" checkout --quiet "$side" -- "${conflicts[@]}"
+  git -C "$WORKTREE" add -- "${conflicts[@]}"
+  log "resolved conflict in upstream-owned ${conflicts[*]} with $side"
+}
+
+# Commit a cherry-pick resolved by resolve_upstream_owned_conflicts, or skip it when the
+# resolution left nothing to commit (the fix only touched upstream-owned paths).
+finish_resolved_cherry_pick() {
+  if git -C "$WORKTREE" diff --cached --quiet; then
+    git -C "$WORKTREE" cherry-pick --skip
+  else
+    GIT_EDITOR=true git -C "$WORKTREE" cherry-pick --continue >/dev/null
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # sync-main: merge upstream/main into the fork's main without rewriting history.
 # ---------------------------------------------------------------------------
@@ -276,12 +306,17 @@ sync_main() {
 
   make_worktree "$fork_main"
   local out
-  if ! out="$(git -C "$WORKTREE" merge --no-edit --no-ff "$upstream_main" \
+  if ! out="$(git -C "$WORKTREE" -c rerere.enabled=false merge --no-edit --no-ff "$upstream_main" \
       -m "Merge upstream/main into main" 2>&1)"; then
-    local conflicts
-    conflicts="$(git -C "$WORKTREE" diff --name-only --diff-filter=U || true)"
-    git -C "$WORKTREE" merge --abort || true
-    fail "Merging upstream/main into main conflicted" "$out"$'\n\nConflicting files:\n'"$conflicts"
+    # In a merge, --theirs is upstream/main.
+    if resolve_upstream_owned_conflicts --theirs; then
+      git -C "$WORKTREE" commit --quiet --no-edit
+    else
+      local conflicts
+      conflicts="$(git -C "$WORKTREE" diff --name-only --diff-filter=U || true)"
+      git -C "$WORKTREE" merge --abort || true
+      fail "Merging upstream/main into main conflicted" "$out"$'\n\nConflicting files:\n'"$conflicts"
+    fi
   fi
 
   # Upstream must never change the mirror's own files (GITHUB_TOKEN cannot push workflow
@@ -359,14 +394,21 @@ apply_patches() {
     subject="$(git log -1 --format='%h %s' "$c")"
     before="$(git -C "$WORKTREE" rev-parse HEAD)"
     if $empty_drop; then
-      out="$(git -C "$WORKTREE" cherry-pick --empty=drop "$c" 2>&1)" || {
-        git -C "$WORKTREE" cherry-pick --abort 2>/dev/null || true
-        fail "Cherry-pick of fix commit conflicted: $subject" "$out"
+      out="$(git -C "$WORKTREE" -c rerere.enabled=false cherry-pick --empty=drop "$c" 2>&1)" || {
+        # In a cherry-pick, --ours is the upstream release being built on.
+        if resolve_upstream_owned_conflicts --ours; then
+          finish_resolved_cherry_pick
+        else
+          git -C "$WORKTREE" cherry-pick --abort 2>/dev/null || true
+          fail "Cherry-pick of fix commit conflicted: $subject" "$out"
+        fi
       }
-    elif ! out="$(git -C "$WORKTREE" cherry-pick "$c" 2>&1)"; then
+    elif ! out="$(git -C "$WORKTREE" -c rerere.enabled=false cherry-pick "$c" 2>&1)"; then
       # Older git stops on a now-empty commit with a clean tree; anything else is a conflict.
       if [[ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=no)" ]]; then
         git -C "$WORKTREE" cherry-pick --skip
+      elif resolve_upstream_owned_conflicts --ours; then
+        finish_resolved_cherry_pick
       else
         git -C "$WORKTREE" cherry-pick --abort 2>/dev/null || true
         fail "Cherry-pick of fix commit conflicted: $subject" "$out"

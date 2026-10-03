@@ -118,6 +118,8 @@ Merges `upstream/main` into `main` with a merge commit, never a rebase. It refus
 
 A failure never publishes the failing version. It opens the issue **Mirror release failed**, or comments on it if it is already open, with the summary and a link to the run.
 
+Conflicts confined to `CHANGELOG.md` do not fail the run. Upstream owns that file, and every upstream release rewrites the `## UNRELEASED` section that fix commits add entries to, so both the cherry-pick and the `main` merge resolve it to upstream's version. A fix commit left empty by that is dropped. The fork's changelog entries therefore never reach published packages or `main`. Conflicts in any other file still fail as described below.
+
 - **Cherry-pick conflicted.** Upstream changed the code our fix touches. Rebase the fix onto the blocked release:
 
   ```sh
