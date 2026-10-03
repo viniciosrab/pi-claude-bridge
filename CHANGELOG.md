@@ -2,7 +2,8 @@
 
 ## UNRELEASED
 
-- **Fix: codemode MCP servers visible to Claude (issue #4)** — Claude Code truncates every MCP tool description to 2,048 characters, and pi 0.99's `codemode` description lists its MCP servers only after ~6.9k, so Claude never saw them and fell back to probing or shelling out. Every Claude Code child now runs with `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=1000000`, overriding any lower user value.
+- **Fix: system prompt sections survive prompt capture (issue #153)** — pi 0.99.2+ adds an `mcp_servers` section through its MCP extension. The transcript replay now ranks unlisted sections after the built-ins, matching pi's builder, so the capture key matches instead of failing every turn; and recorded sections are projected to Claude Code instead of being silently dropped. The failure message points at a section-order divergence instead of blaming extension load order.
+- **Fix: duplicate AGENTS.md instructions (#151)** — Exclude Claude Code's native copy, matching the existing CLAUDE.md exclusions.
 
 ## 0.9.1 — 2026-09-30
 
