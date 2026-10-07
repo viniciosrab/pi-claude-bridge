@@ -1374,6 +1374,22 @@ function dropAbandonedStreamBlocks(c: QueryContext, why: string): void {
 function processAssistantMessage(message: SDKMessage, model: Model<any>, customToolNameToPi: Map<string, string>, c: QueryContext): void {
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
+	// Claude Code reports API failures and its own quota/context notices as a
+	// `<synthetic>` assistant message: a report, not model output. Streaming its text
+	// pins the turn's output before the failure it describes, and a consumer that only
+	// fails over before output commits (pi-model-fallback-alias) then cannot reach the
+	// next provider. Keep the wording on the failed turn — the error event carries it —
+	// but emit no events, so the turn still reads as a call that produced no output.
+	// Issue #162.
+	if (assistantMsg.model === "<synthetic>") {
+		debug(`processAssistantMessage: <synthetic> message, keeping ${assistantMsg.content.length} block(s) off the stream`);
+		for (const block of assistantMsg.content) {
+			if (block.type === "text" && block.text) c.turnBlocks.push({ type: "text", text: block.text });
+			else debug("processAssistantMessage: unhandled <synthetic> block type", block.type);
+		}
+		if (assistantMsg.usage && c.turnOutput) recordUsage(c.turnOutput, assistantMsg.usage, model);
+		return;
+	}
 	if (c.turnSawStreamEvent) {
 		// Same id was already delivered; a new id is CC's non-streaming fallback.
 		// Drop the stalled stream's partial blocks if it never stopped. Deliberately

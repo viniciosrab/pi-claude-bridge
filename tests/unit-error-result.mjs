@@ -129,6 +129,32 @@ describe("error results", () => {
 		assert.deepStrictEqual(texts.map((b) => b.text), [errorResult.result]);
 	});
 
+	// A consumer that fails over only before output commits, such as
+	// pi-model-fallback-alias, cannot reach the next provider if Claude Code's own
+	// failure report counts as output. Such a consumer commits on anything that is
+	// not a start or thinking event, so only that prefix may precede the terminal
+	// error.
+	it("keeps a synthetic report off the stream, so failover is still possible", async () => {
+		const c = makeCtx();
+		await consume(c, [
+			{ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: errorResult.result }] } },
+			errorResult,
+		]);
+
+		const stream = c.currentPiStream;
+		__test.finalizeCurrentStream(c, c.turnOutput.stopReason);
+
+		const beforeTerminal = stream.events.slice(0, -2);
+		assert.ok(
+			beforeTerminal.every((e) => e.type === "start" || e.type.startsWith("thinking_")),
+			`synthetic report must not commit output, got: ${stream.events.map((e) => e.type).join(",")}`,
+		);
+		assert.strictEqual(stream.events.at(-2).type, "error");
+		assert.strictEqual(stream.events.at(-2).error.errorMessage, errorResult.result);
+		// The wording still reaches pi's transcript as the failed turn's content.
+		assert.deepStrictEqual(c.turnOutput.content, [{ type: "text", text: errorResult.result }]);
+	});
+
 	it("still streams and finalizes a successful result normally", async () => {
 		const c = makeCtx();
 		await consume(c, [{ type: "result", subtype: "success", is_error: false, result: "done" }]);

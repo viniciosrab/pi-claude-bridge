@@ -194,11 +194,13 @@ test("is_error can be true on a result whose subtype is still success", { timeou
 	// the dedicated error subtypes carry `errors` instead.
 	let result = null;
 	let threw = null;
+	const assistantMessages = [];
 	try {
 		for await (const message of query({
 			prompt: `Summarize this in one word:\n${"banana ".repeat(220_000)}`,
 			options: providerOptions({ maxTurns: 1, persistSession: false }),
 		})) {
+			if (message.type === "assistant") assistantMessages.push(message);
 			if (message.type === "result") result = message;
 		}
 	} catch (error) {
@@ -212,6 +214,17 @@ test("is_error can be true on a result whose subtype is still success", { timeou
 	// The SDK then rejects the generator, which is why the provider's catch path
 	// has to prefer the text consumeQuery already recorded off the result.
 	assert.match(threw?.message ?? "", /too long/i, `SDK swallowed the cause: ${threw?.message}`);
+
+	// CC prefixes the failure with a `<synthetic>` assistant message carrying the
+	// same text — its own report, not model output. src/index.ts keys its
+	// keep-off-the-stream branch (issue #162) on model === "<synthetic>", and
+	// processAssistantMessage assumes no stream_event preceded it.
+	assert.ok(assistantMessages.length > 0, "no assistant message preceded the failure result");
+	for (const { message } of assistantMessages) {
+		assert.equal(message.model, "<synthetic>", `failure report is not synthetic: model=${message.model}`);
+		assert.ok((message.content ?? []).some((b) => b.type === "text" && /too long/i.test(b.text ?? "")),
+			`synthetic message lost the failure text: ${JSON.stringify(message.content)?.slice(0, 200)}`);
+	}
 });
 
 test("result.modelUsage reports the served context window", { timeout: 120_000 }, async () => {
