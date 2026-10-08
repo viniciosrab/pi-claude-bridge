@@ -22,6 +22,10 @@ const home = mkdtempSync(join(tmpdir(), "claude-bridge-rate-limit-home-"));
 const oldHome = process.env.HOME;
 process.env.CLAUDE_CONFIG_DIR = claudeDir;
 process.env.HOME = home;
+// pi resolves the agent dir from PI_CODING_AGENT_DIR before HOME, and the unit-suite
+// preload sets it; drop it so the agent dir follows the temp HOME.
+const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+delete process.env.PI_CODING_AGENT_DIR;
 const agentDir = getAgentDir();
 // An agent-dir env override would redirect writes to a real config dir.
 assert.ok(agentDir.startsWith(home), `agent dir escaped the temp HOME: ${agentDir}`);
@@ -72,6 +76,8 @@ const limitResult = {
 after(() => {
 	if (oldHome === undefined) delete process.env.HOME;
 	else process.env.HOME = oldHome;
+	if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
 });
 afterEach(() => setPiUI(null));
 
