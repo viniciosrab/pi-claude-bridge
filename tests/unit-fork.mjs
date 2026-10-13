@@ -4,7 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { providerSettingSourcesOption } from "../src/fork.js";
+import { providerSettingSourcesOption, rateLimitNoticesEnabled, withRateLimitNoticeFilter } from "../src/fork.js";
 
 describe("providerSettingSourcesOption", () => {
 	it("leaves settingSources at the SDK default when unset", () => {
@@ -18,5 +18,81 @@ describe("providerSettingSourcesOption", () => {
 
 	it("disables every setting source when loadClaudeSettings is false", () => {
 		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: false }), { settingSources: [] });
+	});
+});
+
+describe("rateLimitNoticesEnabled", () => {
+	it("shows rate-limit notices by default", () => {
+		assert.equal(rateLimitNoticesEnabled(), true);
+		assert.equal(rateLimitNoticesEnabled({}), true);
+	});
+
+	it("shows rate-limit notices when rateLimitWarnings is true", () => {
+		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: true }), true);
+	});
+
+	it("hides rate-limit notices when rateLimitWarnings is false", () => {
+		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: false }), false);
+	});
+});
+
+describe("withRateLimitNoticeFilter", () => {
+	function recordingUI() {
+		const notices = [];
+		return {
+			notices,
+			ui: {
+				prefix: "ui:",
+				notify(message, type) { notices.push({ message, type }); },
+				label(text) { return this.prefix + text; },
+			},
+		};
+	}
+	const rateLimitNotices = [
+		"Claude rate limit warning: 80% used (five_hour)",
+		"Claude subscription rate limit reached (five_hour) — resets at 6:30 PM",
+		"Claude rate limited (five_hour) — resets at 6:30 PM",
+	];
+
+	it("passes a null UI through", () => {
+		assert.equal(withRateLimitNoticeFilter(null, () => ({})), null);
+	});
+
+	it("drops rate-limit notices when rateLimitWarnings is false", () => {
+		const { ui, notices } = recordingUI();
+		const filtered = withRateLimitNoticeFilter(ui, () => ({ rateLimitWarnings: false }));
+		for (const message of rateLimitNotices) filtered.notify(message, "warning");
+		assert.deepEqual(notices, []);
+	});
+
+	it("keeps rate-limit notices when rateLimitWarnings is unset", () => {
+		const { ui, notices } = recordingUI();
+		const filtered = withRateLimitNoticeFilter(ui, () => ({}));
+		for (const message of rateLimitNotices) filtered.notify(message, "warning");
+		assert.deepEqual(notices.map((n) => n.message), rateLimitNotices);
+	});
+
+	it("keeps every other notice when rateLimitWarnings is false", () => {
+		const { ui, notices } = recordingUI();
+		const filtered = withRateLimitNoticeFilter(ui, () => ({ rateLimitWarnings: false }));
+		filtered.notify("Claude Code exited with code 1", "error");
+		assert.deepEqual(notices, [{ message: "Claude Code exited with code 1", type: "error" }]);
+	});
+
+	it("reads the setting on each notice, so a config reload applies", () => {
+		const { ui, notices } = recordingUI();
+		let provider = {};
+		const filtered = withRateLimitNoticeFilter(ui, () => provider);
+		provider = { rateLimitWarnings: false };
+		filtered.notify(rateLimitNotices[0], "warning");
+		assert.deepEqual(notices, []);
+	});
+
+	it("forwards the UI's other members bound to the UI", () => {
+		const { ui } = recordingUI();
+		const filtered = withRateLimitNoticeFilter(ui, () => ({}));
+		const { label } = filtered;
+		assert.equal(label("x"), "ui:x");
+		assert.equal(filtered.prefix, "ui:");
 	});
 });
