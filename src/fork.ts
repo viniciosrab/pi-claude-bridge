@@ -8,12 +8,16 @@
 // add a hook line next to them instead.
 
 import type { query } from "@anthropic-ai/claude-agent-sdk";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
 	// Set to false to stop the provider's Claude Code subprocess from loading
 	// user/project/local settings (hooks, plugins, env, apiKeyHelper).
 	loadClaudeSettings?: boolean;
+	// Set to false to hide the Claude rate-limit notices (usage warnings and
+	// "rate limit reached") shown in pi. Failures are still named as rate limits.
+	rateLimitWarnings?: boolean;
 }
 
 // Config["provider"] does not declare the fork's keys, but loadConfig keeps every key
@@ -40,4 +44,37 @@ export function withProviderSettingSources(impl: typeof query, getProvider: () =
 		if (!override.settingSources || !Array.isArray(tools) || tools.length > 0) return impl(params);
 		return impl({ ...params, options: { ...params.options, ...override } });
 	}) as typeof query;
+}
+
+/** Whether to show the Claude rate-limit notices in pi. Absent keeps them on;
+ *  `rateLimitWarnings: false` hides them. */
+export function rateLimitNoticesEnabled(provider?: object): boolean {
+	return forkSettings(provider).rateLimitWarnings !== false;
+}
+
+// Upstream's rate-limit notices all read "Claude ... rate limit ..." ("Claude rate limit
+// warning: 80% used", "Claude subscription rate limit reached"). Filtering on the text
+// keeps the hook out of consumeQuery, which upstream rewrites often;
+// unit-rate-limit-warnings.mjs fails if the wording drifts past this pattern.
+const RATE_LIMIT_NOTICE = /^Claude\b.*\brate limit/i;
+
+/** Wrap pi's UI so its rate-limit notices are dropped while `rateLimitWarnings` is
+ *  false. Settings are read per notice because config reloads after the UI is set. */
+export function withRateLimitNoticeFilter(
+	ui: ExtensionUIContext | null,
+	getProvider: () => object | undefined,
+): ExtensionUIContext | null {
+	if (!ui) return ui;
+	return new Proxy(ui, {
+		get(target, prop) {
+			if (prop === "notify") {
+				return (message: string, type?: Parameters<ExtensionUIContext["notify"]>[1]) => {
+					if (RATE_LIMIT_NOTICE.test(message) && !rateLimitNoticesEnabled(getProvider())) return;
+					target.notify(message, type);
+				};
+			}
+			const value = Reflect.get(target, prop, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
 }
