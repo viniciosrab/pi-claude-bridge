@@ -39,7 +39,7 @@ The bumped patch number places a revision between its base and upstream's next p
 
 1. Creates a temporary worktree at the version's `gitHead`.
 2. Cherry-picks the fix commits: the commits on `patches` that upstream history does not contain. Commits upstream already has become empty and are dropped (`--empty=drop`). If a release is the one `patches` already sits on, those exact commits are reused. When several versions are built, each one builds on the fix commits rebuilt for the version before it.
-3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs, a fork note in the README and the npm badge (and, for a fork revision, its version). None of this is committed.
+3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs, a fork note and a **Fork-only options** section in the README, and the npm badge (and, for a fork revision, its version). None of this is committed.
 4. Runs `npm ci`, `npm run test:unit`, `npm run typecheck` and `npm pack`.
 
 The artifact holds these files:
@@ -85,7 +85,26 @@ Merges `upstream/main` into `main` with a merge commit, never a rebase. It refus
 ### Branches
 
 - `patches`: only the fix commits, on top of the upstream release they were last built on. No CI files. Pushing a new fix commit here makes the next run publish a fork revision.
-- `main`: upstream `main` + the fix + this workflow, script and doc.
+- `main`: upstream `main` + the fix + this workflow, script and doc, plus `.github/README.md` (the fork's GitHub landing page) and the fork's line in `LICENSE`. The root `README.md` stays identical to upstream's: GitHub shows `.github/README.md` instead, so the fork's branding never conflicts with upstream's README edits.
+
+## Writing fix commits
+
+Every upstream release is a fresh cherry-pick of the fix commits, and upstream edits `src/index.ts`, its tests and `README.md` in nearly every release. A fix commit conflicts when upstream edits a line it touches or a line right next to one. So fix commits follow one rule: **add lines, never edit upstream's.**
+
+- Fork code goes in [`src/fork.ts`](../src/fork.ts), and fork tests in fork-only files (`tests/unit-fork.mjs`, `tests/unit-provider-setting-sources.mjs`, `tests/unit-rate-limit-warnings.mjs`).
+- `src/index.ts` gets one-line hooks marked `// fork: <option>`, each a line of its own: one `./fork.js` import after the `path` import, and one call per feature. Place a hook next to stable code, away from blocks upstream keeps rewriting (`consumeQuery`, the shared `./config.js` import, `CC_CHILD_ENV`).
+- Do not edit upstream's `Config` interface, `README.md`, `CHANGELOG.md` or upstream tests. Fork options are read in `src/fork.ts`, and documented in `.github/README.md` and by the build (`apply_identity`).
+- Tests assert the fork's behavior, not upstream's wording.
+
+Before pushing to `patches`, replaying the fix commits onto recent upstream commits catches a hook placed on a busy line:
+
+```sh
+for b in $(git rev-list --first-parent -40 upstream/main); do
+  git switch -q --detach "$b"
+  git cherry-pick $(git rev-list --reverse upstream/main..patches) >/dev/null 2>&1 || { echo "conflict on $b"; git cherry-pick --abort; }
+done
+git switch -q patches
+```
 
 ## One-time setup
 

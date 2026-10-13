@@ -458,6 +458,18 @@ EOF
 )"
     awk -v note="$note" 'NR==1 { print; print note; next } { print }' README.md >README.md.tmp
     mv README.md.tmp README.md
+
+    # Fix commits leave upstream's README alone so they never conflict with it (see
+    # src/fork.ts); the fork-only options are documented here, in the package only.
+    cat >>README.md <<'EOF'
+
+## Fork-only options
+
+Set under `provider` in the bridge config, alongside the options in [Configuration](#configuration) (`@viniciosrab/pi-claude-bridge` only):
+
+- `loadClaudeSettings` — load Claude Code's user/project/local settings in the provider's Claude Code subprocess (default `true`). Set `false` to skip them: settings-sourced hooks and plugins no longer run on every turn, which can noticeably cut tokens and latency when you have many configured. It also drops settings-sourced `env` and `apiKeyHelper`, so keep the default if you rely on those (e.g. Bedrock/Vertex setup in `settings.json`). OAuth login, pi tools and extensions are unaffected. Applies only to the provider path; AskClaude always loads settings.
+- `rateLimitWarnings` — show Claude rate-limit notices in pi (default `true`): the usage warning at each 5% step and the notice with the reset time when a request is rejected. Set `false` to hide both. A rejected request's failure is still named as a rate limit (so fallback chains keep working).
+EOF
   )
 }
 
