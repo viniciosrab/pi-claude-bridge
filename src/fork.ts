@@ -63,3 +63,21 @@ export function withRateLimitNoticeFilter(
 		},
 	});
 }
+
+// CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: CC truncates each MCP tool description to
+// 2,048 chars. Pi tools reach CC as MCP tools and pi already budgets their descriptions
+// (codemode.inlineBudget); the cap cut codemode's nested-tool listing, hiding every
+// codemode-exposed MCP server from Claude (issue #4). Overrides a user-set value on
+// purpose, since a lower limit brings the bug back.
+export const FORK_CHILD_ENV = {
+	CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "1000000",
+} as const;
+
+/** Put FORK_CHILD_ENV on pi's own environment. Every Claude Code child the bridge
+ *  spawns gets `{ ...process.env, ...CC_CHILD_ENV }`, so this reaches all of them
+ *  without editing CC_CHILD_ENV, which upstream owns and pins in its own test. */
+export function applyForkChildEnv(env: NodeJS.ProcessEnv = process.env): void {
+	Object.assign(env, FORK_CHILD_ENV);
+}
+
+applyForkChildEnv();

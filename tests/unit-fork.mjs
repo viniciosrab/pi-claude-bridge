@@ -4,7 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { providerSettingSourcesOption, rateLimitNoticesEnabled, withRateLimitNoticeFilter } from "../src/fork.js";
+import { FORK_CHILD_ENV, applyForkChildEnv, providerSettingSourcesOption, rateLimitNoticesEnabled, withRateLimitNoticeFilter } from "../src/fork.js";
 
 describe("providerSettingSourcesOption", () => {
 	it("leaves settingSources at the SDK default when unset", () => {
@@ -94,5 +94,22 @@ describe("withRateLimitNoticeFilter", () => {
 		const { label } = filtered;
 		assert.equal(label("x"), "ui:x");
 		assert.equal(filtered.prefix, "ui:");
+	});
+});
+
+describe("applyForkChildEnv", () => {
+	it("lifts Claude Code's MCP description cap", () => {
+		assert.deepEqual(FORK_CHILD_ENV, { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "1000000" });
+	});
+
+	it("overrides a lower user-set limit", () => {
+		const env = { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "2048", PATH: "/bin" };
+		applyForkChildEnv(env);
+		assert.deepEqual(env, { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "1000000", PATH: "/bin" });
+	});
+
+	it("is applied to pi's environment once the bridge loads", async () => {
+		await import("../src/index.js");
+		assert.equal(process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "1000000");
 	});
 });

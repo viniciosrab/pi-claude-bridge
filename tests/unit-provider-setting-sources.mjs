@@ -95,3 +95,10 @@ describe("provider query settingSources", () => {
 		assert.deepEqual(options.settingSources, []);
 	});
 });
+
+describe("provider query env", () => {
+	it("lifts Claude Code's MCP description cap for the provider's child", async () => {
+		const options = await capturedOptions({ provider: {} });
+		assert.equal(options.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "1000000");
+	});
+});
