@@ -1,8 +1,6 @@
 # pi-claude-bridge
 
-[![npm version](https://img.shields.io/npm/v/@viniciosrab/pi-claude-bridge)](https://www.npmjs.com/package/@viniciosrab/pi-claude-bridge)
-
-> **This is an automated mirror of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by [Eli Dickinson](https://github.com/elidickinson)**, published as [`@viniciosrab/pi-claude-bridge`](https://www.npmjs.com/package/@viniciosrab/pi-claude-bridge). Every upstream release is rebuilt with two additions — [`provider.loadClaudeSettings`](#configuration) and [`provider.rateLimitWarnings`](#configuration) — and published under the same version number; fork-only changes ship as `X.Y.(Z+1)-fork.N`. See [Credits](#credits) and [docs/mirror.md](docs/mirror.md).
+[![npm version](https://img.shields.io/npm/v/pi-claude-bridge)](https://www.npmjs.com/package/pi-claude-bridge)
 
 Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
 
@@ -20,7 +18,7 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 ## Install
 
 ```
-pi install npm:@viniciosrab/pi-claude-bridge
+pi install npm:pi-claude-bridge
 ```
 
 Requires pi 0.86.1 or newer.
@@ -37,22 +35,7 @@ The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai
 
 ## AskClaude Tool
 
-Opt-in: set `askClaude.enabled` to `true` (see [Configuration](#configuration)). Available when using any non-claude-bridge provider. Pi's LLM can delegate tasks to Claude Code and wait for it to answer a question or perform a task. Examples of how to use:
-
-- "Ask Claude to plan a fix"
-- "If you get stuck, ask claude for help"
-- "Ask claude to review the plan in @foo.md, implement it, then ask an isolated=true claude to review the implementation"
-- "Ask claude to poke holes in this theory"
-
-Delegated calls don't read global `CLAUDE.md` files or Claude Code's skill listing, and always get Claude Code's own system prompt.
-
-### Parameters
-
-- **`prompt`** — the question or task for Claude Code
-- **`mode`** — `read` (default, read files and search/fetch on web), `none`, or `full` (read+write+bash, disable this mode with `allowFullMode: false` in config)
-- **`model`** — `opus` (default), `sonnet`, `haiku`, or a full model ID
-- **`thinking`** — effort level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
-- **`isolated`** — when `true`, Claude gets a clean session with no conversation history (default: `false`)
+**Deprecated:** AskClaude is an opt-in legacy tool and may be removed in a future release. You should set `askClaude.enabled` to `true` (see [Configuration](#configuration)) to use it. You can recreate similar functionality with one of the many Pi subagent extensions.
 
 ## Configuration
 
@@ -91,12 +74,10 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `forceTwoHundredK` — array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if pi-ai declares a model at 1M but Claude Code won't serve it on your plan.
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
-- `loadClaudeSettings` — load Claude Code's user/project/local settings in the provider's Claude Code subprocess (default `true`). Set `false` to skip them: settings-sourced hooks and plugins no longer run on every turn, which can noticeably cut tokens and latency when you have many configured. It also drops settings-sourced `env` and `apiKeyHelper`, so keep the default if you rely on those (e.g. Bedrock/Vertex setup in `settings.json`). OAuth login, pi tools and extensions are unaffected. Applies only to the provider path; AskClaude always loads settings.
-- `rateLimitWarnings` — show Claude rate-limit notices in pi (default `true`): a usage warning at each 5% step once Claude Code reports `allowed_warning`, and a "rate limited" notice with the reset time when a request is rejected. Set `false` to hide both. A rejected request's failure is still named as a rate limit (so fallback chains keep working).
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
 
 
-**Startup notice:** the first session lists `provider.plan` and `askClaude.enabled` if unset, then records `startupNoticeShown` in the global config so it doesn't nag again.
+**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. There's also a deprecation notice on first use of AskClaude that records its display date as `askClaudeDeprecationShown`.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
@@ -142,11 +123,19 @@ To add instructions, use `message`, `context`, or a system-message edit that kee
 [ -n "$PI_CODING_AGENT" ] && exit 0
 ```
 
-Hooks do not fire on the compact-summary side query.
+Hooks do not fire on isolated summary queries.
+
+### Compaction and branch summaries
+
+pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks.
 
 ### System prompt rejections
 
 Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (`docs/custom-provider.md` in the same prompt with `docs/packages.md`), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; `CLAUDE_BRIDGE_DEBUG=1` writes the full prompt to the bridge log when this happens.
+
+### Plan usage for footers and quota extensions
+
+The bridge does not show plan usage itself. Claude Code sends a `rate_limit_event` when a usage window changes, and the bridge passes it to pi's `after_provider_response` event as `anthropic-ratelimit-unified-*` headers. Events are not tied to one response: one that arrives after a turn has ended on a tool call is reported on the next provider call, and only the latest is kept. The headers use the names that the Anthropic API uses (for example `anthropic-ratelimit-unified-5h-utilization`). The bridge sends only the headers that it can make from the event: the status, the reset time, the representative claim, the overage status and reset, and the utilization and reset of each window. The status code is always 200. An extension that reads these headers for the built-in `anthropic` provider can also accept `claude-bridge` without other changes.
 
 ### Using claude bridge with @gotgenes/pi-subagents
 
@@ -165,15 +154,3 @@ Requires the following in `~/.pi/agent/subagents.json`:
 **System prompt changes mid-session may not reach the model.** The bridge keeps Claude Code's default prompt recording: project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused on resume. This keeps the cached prefix stable, but later changes may not take effect until a rebuild or compaction. Start a new session if updated instructions must take effect immediately.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.
-
-## Credits
-
-pi-claude-bridge was created by [Eli Dickinson](https://github.com/elidickinson); the original project lives at [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) and on npm as [`pi-claude-bridge`](https://www.npmjs.com/package/pi-claude-bridge). It was originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
-
-This repository is maintained by [viniciosrab](https://github.com/viniciosrab) and adds:
-
-- **`provider.loadClaudeSettings`** — skip Claude Code's user/project/local settings (hooks, plugins, `env`, `apiKeyHelper`) in the provider subprocess. Proposed upstream in [issue #141](https://github.com/elidickinson/pi-claude-bridge/issues/141).
-- **`provider.rateLimitWarnings`** — hide the rate-limit notices shown in pi mid-call.
-- **An automated npm mirror** ([docs/mirror.md](docs/mirror.md)) that republishes every upstream release with these additions.
-
-Licensed under MIT; the original copyright is kept in [LICENSE](LICENSE).

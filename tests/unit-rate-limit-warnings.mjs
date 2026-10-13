@@ -3,7 +3,8 @@
  * pi (a warning per 5% step of allowed_warning, and "rate limited" on rejected)
  * appear by default and not at all with `rateLimitWarnings: false`, while a
  * rejected event still names the failure it caused as a rate limit.
- * unit-config.mjs pins the helper; this pins the wiring. Config is loaded the way
+ * unit-fork.mjs pins the helpers; this pins the wiring. The assertions avoid
+ * upstream's exact wording, which changes between releases. Config is loaded the way
  * pi activates the extension, and consumeQuery is driven with a fake SDK stream —
  * no Claude Code subprocess runs.
  */
@@ -85,8 +86,8 @@ describe("rate-limit notices", () => {
 	it("are shown by default", async () => {
 		const { notices } = await consume({ provider: {} }, [warning, rejection, limitResult]);
 		assert.deepEqual(notices.map((n) => n.type), ["warning", "warning"]);
-		assert.match(notices[0].message, /^Claude rate limit warning: 80% used \(five_hour\)/);
-		assert.match(notices[1].message, /^Claude rate limited \(five_hour\)/);
+		assert.match(notices[0].message, /80% used/);
+		assert.match(notices[1].message, /five_hour/);
 	});
 
 	it("are shown when rateLimitWarnings is true", async () => {
@@ -101,7 +102,7 @@ describe("rate-limit notices", () => {
 
 	it("still name a rejected failure as a rate limit when rateLimitWarnings is false", async () => {
 		const { errorMessage } = await consume({ provider: { rateLimitWarnings: false } }, [rejection, limitResult]);
-		assert.match(errorMessage, /^Claude rate limit \(five_hour\)/);
+		assert.match(errorMessage, /rate limit/i);
 		assert.ok(errorMessage.includes(limitResult.result), "keeps Claude Code's own wording");
 	});
 });

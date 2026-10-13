@@ -11,6 +11,8 @@ import { dirname, join } from "path";
 export interface Config {
 	/** Date (YYYY-MM-DD) the one-time startup notice was shown. Written by the extension, not the user. */
 	startupNoticeShown?: string;
+	/** Date (YYYY-MM-DD) the AskClaude deprecation notice was shown. Written by the extension, not the user. */
+	askClaudeDeprecationShown?: string;
 	askClaude?: {
 		enabled?: boolean;
 		name?: string;
@@ -25,12 +27,6 @@ export interface Config {
 	provider?: {
 		strictMcpConfig?: boolean;
 		autoMemoryEnabled?: boolean;
-		// Set to false to stop the provider's Claude Code subprocess from loading
-		// user/project/local settings (hooks, plugins, env, apiKeyHelper).
-		loadClaudeSettings?: boolean;
-		// Set to false to hide the Claude rate-limit notices (usage warnings and
-		// "rate limited") shown in pi. Failures are still named as rate limits.
-		rateLimitWarnings?: boolean;
 		pathToClaudeCodeExecutable?: string;
 		// Subscription plan tier. Setting to "max" enables Opus 4.6 at 1M context
 		plan?: "pro" | "max";
@@ -56,18 +52,6 @@ export function tryParseJson(path: string): Partial<Config> {
 
 export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMemoryEnabled: boolean } {
 	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
-}
-
-/** Provider-path `settingSources` override. Absent keeps the SDK default (all sources);
- *  `loadClaudeSettings: false` passes an empty list so no settings files are loaded. */
-export function providerSettingSourcesOption(provider: Config["provider"] = {}): { settingSources?: [] } {
-	return provider.loadClaudeSettings === false ? { settingSources: [] } : {};
-}
-
-/** Whether to show the Claude rate-limit notices in pi. Absent keeps them on;
- *  `rateLimitWarnings: false` hides them. */
-export function rateLimitNoticesEnabled(provider: Config["provider"] = {}): boolean {
-	return provider.rateLimitWarnings !== false;
 }
 
 export function globalConfigPath(): string {
@@ -99,11 +83,32 @@ export function markStartupNoticeShown(): string {
 	return path;
 }
 
+/** Record when the AskClaude deprecation notice was shown in the global config, preserving every
+ *  other field. Returns the config path either way. */
+export function markAskClaudeDeprecationNoticeShown(): string {
+	const path = globalConfigPath();
+	let existing: Partial<Config> = {};
+	if (existsSync(path)) {
+		try {
+			existing = JSON.parse(readFileSync(path, "utf-8"));
+		} catch (e) {
+			console.error(`claude-bridge: leaving ${path} alone, it does not parse: ${e}`);
+			return path;
+		}
+	}
+	// Match startupNoticeShown's local YYYY-MM-DD date format.
+	const next = { ...existing, askClaudeDeprecationShown: new Date().toLocaleDateString("en-CA") };
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+	return path;
+}
+
 export function loadConfig(cwd: string): Config {
 	const global = tryParseJson(globalConfigPath());
 	const project = tryParseJson(join(cwd, CONFIG_DIR_NAME, "claude-bridge.json"));
 	return {
 		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
+		askClaudeDeprecationShown: project.askClaudeDeprecationShown ?? global.askClaudeDeprecationShown,
 		askClaude: { ...global.askClaude, ...project.askClaude },
 		provider: { ...global.provider, ...project.provider },
 	};

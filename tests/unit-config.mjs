@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, loadConfig, markStartupNoticeShown, providerSettingSourcesOption, rateLimitNoticesEnabled } from "../src/config.js";
+import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -34,36 +34,6 @@ describe("claudeCodeSettings", () => {
 	});
 });
 
-describe("providerSettingSourcesOption", () => {
-	it("leaves settingSources at the SDK default when unset", () => {
-		assert.deepEqual(providerSettingSourcesOption(), {});
-		assert.deepEqual(providerSettingSourcesOption({}), {});
-	});
-
-	it("leaves settingSources at the SDK default when loadClaudeSettings is true", () => {
-		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: true }), {});
-	});
-
-	it("disables every setting source when loadClaudeSettings is false", () => {
-		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: false }), { settingSources: [] });
-	});
-});
-
-describe("rateLimitNoticesEnabled", () => {
-	it("shows rate-limit notices by default", () => {
-		assert.equal(rateLimitNoticesEnabled(), true);
-		assert.equal(rateLimitNoticesEnabled({}), true);
-	});
-
-	it("shows rate-limit notices when rateLimitWarnings is true", () => {
-		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: true }), true);
-	});
-
-	it("hides rate-limit notices when rateLimitWarnings is false", () => {
-		assert.equal(rateLimitNoticesEnabled({ rateLimitWarnings: false }), false);
-	});
-});
-
 describe("loadConfig", () => {
 	it("loads project config from Pi's configured project directory", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
@@ -77,6 +47,7 @@ describe("loadConfig", () => {
 
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
+				askClaudeDeprecationShown: undefined,
 				provider: { plan: "max" },
 				askClaude: { enabled: false },
 			});
@@ -103,6 +74,7 @@ describe("loadConfig", () => {
 
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
+				askClaudeDeprecationShown: undefined,
 				provider: { plan: "max", strictMcpConfig: true, autoMemoryEnabled: true },
 				askClaude: { enabled: false, defaultMode: "read" },
 			});
@@ -131,6 +103,18 @@ describe("loadConfig", () => {
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
+	}));
+
+	it("markAskClaudeDeprecationNoticeShown records today's date without dropping settings", () => withTempHome(() => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const path = join(globalDir, "claude-bridge.json");
+		writeFileSync(path, JSON.stringify({ askClaude: { enabled: true } }));
+
+		markAskClaudeDeprecationNoticeShown();
+		const written = JSON.parse(readFileSync(path, "utf-8"));
+		assert.match(written.askClaudeDeprecationShown, /^\d{4}-\d{2}-\d{2}$/);
+		assert.deepEqual(written.askClaude, { enabled: true });
 	}));
 
 	it("markStartupNoticeShown leaves an unparseable config untouched", () => withTempHome(() => {
@@ -167,6 +151,7 @@ describe("loadConfig", () => {
 
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
+				askClaudeDeprecationShown: undefined,
 				provider: { plan: "max" },
 				askClaude: {},
 			});

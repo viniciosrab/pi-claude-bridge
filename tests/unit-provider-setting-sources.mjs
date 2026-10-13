@@ -1,7 +1,7 @@
 /**
  * provider.loadClaudeSettings wiring: the provider path must hand the SDK
  * `settingSources: []` only when the user opted out, and leave the option
- * absent (SDK default: every source) otherwise. unit-config.mjs pins the
+ * absent (SDK default: every source) otherwise. unit-fork.mjs pins the
  * helper; this pins that the provider query actually receives it. Drives
  * streamSimple with a mocked SDK query() (see setQuery) — no Claude Code
  * subprocess runs.
@@ -93,5 +93,12 @@ describe("provider query settingSources", () => {
 	it("is empty when loadClaudeSettings is false", async () => {
 		const options = await capturedOptions({ provider: { loadClaudeSettings: false } });
 		assert.deepEqual(options.settingSources, []);
+	});
+});
+
+describe("provider query env", () => {
+	it("lifts Claude Code's MCP description cap for the provider's child", async () => {
+		const options = await capturedOptions({ provider: {} });
+		assert.equal(options.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "1000000");
 	});
 });
