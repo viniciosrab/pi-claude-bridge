@@ -72,6 +72,3 @@ For bug reports, set `CLAUDE_BRIDGE_DEBUG=1` and attach `~/.pi/agent/claude-brid
 
 Extension authors and contributors: see upstream's [full README](https://github.com/elidickinson/pi-claude-bridge#readme).
 
-## Credits
-
-Created by [Eli Dickinson](https://github.com/elidickinson) ([upstream](https://github.com/elidickinson/pi-claude-bridge)), originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal. Mirror maintained by [viniciosrab](https://github.com/viniciosrab) ([how it works](https://github.com/viniciosrab/pi-claude-bridge/blob/main/docs/mirror.md)). MIT license.
