@@ -6,10 +6,6 @@ Use Claude (Fable, Opus, Sonnet, Haiku) as a model in [pi](https://github.com/ea
 
 > Automated mirror of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by Eli Dickinson, with a few [fork-only options](#fork-only-options). Versions match upstream; `X.Y.(Z+1)-fork.N` is upstream `X.Y.Z` plus newer fork changes.
 
-<p>
-<a href="https://github.com/viniciosrab/pi-claude-bridge/blob/main/assets/claude-bridge1.png"><img src="https://raw.githubusercontent.com/viniciosrab/pi-claude-bridge/main/assets/claude-bridge1.png" width="49%"></a>&nbsp;
-<a href="https://github.com/viniciosrab/pi-claude-bridge/blob/main/assets/claude-bridge2.png"><img src="https://raw.githubusercontent.com/viniciosrab/pi-claude-bridge/main/assets/claude-bridge2.png" width="49%"></a>
-</p>
 
 ## Install
 
