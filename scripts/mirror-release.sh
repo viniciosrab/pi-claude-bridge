@@ -34,9 +34,6 @@
 #   UPSTREAM_PKG          upstream npm package        (default: pi-claude-bridge)
 #   FORK_PKG              fork npm package            (default: @viniciosrab/pi-claude-bridge)
 #   FORK_REPO             fork GitHub owner/name      (default: viniciosrab/pi-claude-bridge)
-#   UPSTREAM_REPO         upstream GitHub owner/name  (default: elidickinson/pi-claude-bridge)
-#   UPSTREAM_PR           upstream PR number of the fix, linked from the README note
-#                         (default: 142; empty: no link)
 #   UPSTREAM_REMOTE       git remote for upstream     (default: upstream)
 #   FORK_REMOTE           git remote for the fork     (default: origin)
 #   PATCHES_REF           ref holding the fix commits (default: local `patches`, else <fork remote>/patches)
@@ -48,8 +45,6 @@ set -euo pipefail
 UPSTREAM_PKG="${UPSTREAM_PKG:-pi-claude-bridge}"
 FORK_PKG="${FORK_PKG:-@viniciosrab/pi-claude-bridge}"
 FORK_REPO="${FORK_REPO:-viniciosrab/pi-claude-bridge}"
-UPSTREAM_REPO="${UPSTREAM_REPO:-elidickinson/pi-claude-bridge}"
-UPSTREAM_PR="${UPSTREAM_PR-142}"
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 FORK_REMOTE="${FORK_REMOTE:-origin}"
 NPM_PUBLISH_ARGS="${NPM_PUBLISH_ARGS:---provenance --access public}"
@@ -428,12 +423,8 @@ apply_patches() {
 
 # Build-time fork identity. Never committed: the worktree is discarded afterwards.
 apply_identity() {
-  # shellcheck disable=SC2016  # literal markdown backticks
-  local url="https://github.com/$FORK_REPO" addition='the `provider.loadClaudeSettings` option'
-  [[ -z "$UPSTREAM_PR" ]] ||
-    addition+=" ([upstream PR #$UPSTREAM_PR](https://github.com/$UPSTREAM_REPO/pull/$UPSTREAM_PR))"
-  # shellcheck disable=SC2016  # literal markdown backticks
-  addition+=' and the `provider.rateLimitWarnings` option'
+  local url="https://github.com/$FORK_REPO"
+  [[ -f "$REPO_ROOT/.github/README.md" ]] || fail "missing $REPO_ROOT/.github/README.md (the package README)"
   local up_version; up_version="$(upstream_version "$VERSION")"
   (
     cd "$WORKTREE"
@@ -445,31 +436,9 @@ apply_identity() {
     # A fork revision ships upstream's code at a fork-only version number.
     [[ "$VERSION" == "$up_version" ]] || npm pkg set "version=$VERSION"
 
-    # Point the npm badge at the fork package, then insert the note after the title line.
-    sed -i.bak \
-      -e "s#img.shields.io/npm/v/$UPSTREAM_PKG)#img.shields.io/npm/v/$FORK_PKG)#" \
-      -e "s#www.npmjs.com/package/$UPSTREAM_PKG)#www.npmjs.com/package/$FORK_PKG)#" README.md
-    rm -f README.md.bak
-    local note
-    note="$(cat <<EOF
-
-> **Fork note.** \`$FORK_PKG\` is an automated mirror of [\`$UPSTREAM_PKG\`](https://www.npmjs.com/package/$UPSTREAM_PKG) by Eli Dickinson ([$UPSTREAM_REPO](https://github.com/$UPSTREAM_REPO)), rebuilt for each upstream release with fork-only additions: $addition. Versions match upstream; a \`X.Y.(Z+1)-fork.N\` version is upstream \`X.Y.Z\` with newer fork-only changes. Licensed MIT; original copyright and credit belong to Eli Dickinson. Fork: [$FORK_REPO]($url).
-EOF
-)"
-    awk -v note="$note" 'NR==1 { print; print note; next } { print }' README.md >README.md.tmp
-    mv README.md.tmp README.md
-
-    # Fix commits leave upstream's README alone so they never conflict with it (see
-    # src/fork.ts); the fork-only options are documented here, in the package only.
-    cat >>README.md <<'EOF'
-
-## Fork-only options
-
-Set under `provider` in the bridge config, alongside the options in [Configuration](#configuration) (`@viniciosrab/pi-claude-bridge` only):
-
-- `loadClaudeSettings` — load Claude Code's user/project/local settings in the provider's Claude Code subprocess (default `true`). Set `false` to skip them: settings-sourced hooks and plugins no longer run on every turn, which can noticeably cut tokens and latency when you have many configured. It also drops settings-sourced `env` and `apiKeyHelper`, so keep the default if you rely on those (e.g. Bedrock/Vertex setup in `settings.json`). OAuth login, pi tools and extensions are unaffected. Applies only to the provider path; AskClaude always loads settings.
-- `rateLimitWarnings` — show Claude rate-limit notices in pi (default `true`): the usage warning at each 5% step and the notice with the reset time when a request is rejected. Set `false` to hide both. A rejected request's failure is still named as a rate limit (so fallback chains keep working).
-EOF
+    # The package ships the fork's own README; upstream's README.md is never edited on main so
+    # merges never conflict with it (see docs/mirror.md).
+    cp "$REPO_ROOT/.github/README.md" README.md
   )
 }
 

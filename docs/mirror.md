@@ -39,7 +39,7 @@ The bumped patch number places a revision between its base and upstream's next p
 
 1. Creates a temporary worktree at the version's `gitHead`.
 2. Cherry-picks the fix commits: the commits on `patches` that upstream history does not contain. Commits upstream already has become empty and are dropped (`--empty=drop`). If a release is the one `patches` already sits on, those exact commits are reused. When several versions are built, each one builds on the fix commits rebuilt for the version before it.
-3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs, a fork note and a **Fork-only options** section in the README, and the npm badge (and, for a fork revision, its version). None of this is committed.
+3. Applies the fork identity at build time only: package name, repository/homepage/bugs URLs (and, for a fork revision, its version), and replaces `README.md` with `.github/README.md` from the checked-out branch (`main` on scheduled runs), so npm shows the same concise guide as GitHub. None of this is committed.
 4. Runs `npm ci`, `npm run test:unit`, `npm run typecheck` and `npm pack`.
 
 The artifact holds these files:
@@ -93,7 +93,7 @@ Every upstream release is a fresh cherry-pick of the fix commits, and upstream e
 
 - Fork code goes in [`src/fork.ts`](../src/fork.ts), and fork tests in fork-only files (`tests/unit-fork.mjs`, `tests/unit-provider-setting-sources.mjs`, `tests/unit-rate-limit-warnings.mjs`).
 - `src/index.ts` gets one-line hooks marked `// fork: <option>`, each a line of its own: one `./fork.js` import after the `path` import, and one call per feature. Place a hook next to stable code, away from blocks upstream keeps rewriting (`consumeQuery`, the shared `./config.js` import, `CC_CHILD_ENV`).
-- Do not edit upstream's `Config` interface, `README.md`, `CHANGELOG.md` or upstream tests. Fork options are read in `src/fork.ts`, and documented in `.github/README.md` and by the build (`apply_identity`).
+- Do not edit upstream's `Config` interface, `README.md`, `CHANGELOG.md` or upstream tests. Fork options are read in `src/fork.ts` and documented in `.github/README.md`, which is also the package README.
 - Tests assert the fork's behavior, not upstream's wording.
 
 Before pushing to `patches`, replaying the fix commits onto recent upstream commits catches a hook placed on a busy line:
