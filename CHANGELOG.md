@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: abort ignored after a terminated tool batch (#200, issue #199)** — when a run ended with Claude Code's query parked at a tool call (`terminate: true`), aborting the next run did nothing. Each run that continues the query now binds its own signal. Thanks @orshih6 and @cootue.
+
 ## 0.9.3 — 2026-10-13
 
 - **Remove: compaction and branch-summary takeovers (#189)** — pi runs them natively; the bridge routes summary calls to its isolated path. Other compaction extensions should now work. Resolves #115. Thanks @sonSunnoi.
