@@ -8,6 +8,8 @@
 // add a hook line next to them instead.
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { getSessionPath } from "cc-session-io";
+import { readFileSync, statSync } from "node:fs";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
@@ -81,3 +83,83 @@ export function applyForkChildEnv(env: NodeJS.ProcessEnv = process.env): void {
 }
 
 applyForkChildEnv();
+
+// Resume after an abort. Upstream rebuilds Claude Code's session from pi's history after
+// every abort, and a rebuilt file lacks the context blocks CC writes at the head of its own
+// sessions, so the next request re-caches the whole conversation (diag/AUDIT.md, "since CC
+// 2.1.263"). Native Claude Code resumes its own file after Esc, Ctrl-C or SIGTERM and reads
+// the cache back; past a settle window, the bridge does the same.
+
+/** How long after an abort its killed CLI may still write to the session file. The SDK
+ *  closes stdin and force-kills about 2 s later; a sync inside this window rebuilds on a
+ *  rotated id, as upstream does after every abort, rather than share the file. */
+export const ABORT_SETTLE_MS = 3_000;
+
+/** The fields an abort leaves on a session mirror for the next sync. */
+export interface AbortMark {
+	abortedAt?: number;
+	// The aborted query's prompt and the size of CC's session file when that query
+	// started: the resume checks CC wrote the prompt past that point, since a CLI
+	// killed before writing it leaves a file that lacks the prompt.
+	abortedPrompt?: string;
+	abortedFileOffset?: number;
+}
+
+/** What a query records at its start, for the abort mark should it be aborted. */
+export interface AbortedTurn {
+	prompt: string;
+	resumedId: string | null;
+	fileOffset: number;
+}
+
+function sessionFileSize(sessionId: string, cwd: string): number {
+	try {
+		return statSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR)).size;
+	} catch {
+		return 0;
+	}
+}
+
+/** The prompt CC must write for this query (its first text block when it carries
+ *  images) and where the resumed session file stood before it. */
+export function abortedTurnAtStart(promptBlocks: { type: string }[] | null, promptText: string, resumedId: string | null, cwd: string): AbortedTurn {
+	const prompt = promptBlocks ? ((promptBlocks.find((b) => b.type === "text") as { text?: string } | undefined)?.text ?? "") : promptText;
+	return { prompt, resumedId, fileOffset: resumedId ? sessionFileSize(resumedId, cwd) : 0 };
+}
+
+/** The mark for an aborted query on session `sessionId`. A file the query did not
+ *  resume started empty. */
+export function abortMark(turn: AbortedTurn, sessionId: string, now = Date.now()): Required<AbortMark> {
+	return { abortedAt: now, abortedPrompt: turn.prompt, abortedFileOffset: sessionId === turn.resumedId ? turn.fileOffset : 0 };
+}
+
+/** Whether CC wrote the aborted prompt to its session file past the recorded offset.
+ *  Records are JSON lines, so the prompt appears JSON-escaped. */
+function abortedPromptPersisted(sessionId: string, mark: AbortMark, cwd: string): boolean {
+	if (!mark.abortedPrompt) return false;
+	try {
+		const tail = readFileSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR)).subarray(mark.abortedFileOffset ?? 0).toString("utf8");
+		return tail.includes(JSON.stringify(mark.abortedPrompt).slice(1, -1));
+	} catch {
+		return false;
+	}
+}
+
+/** How the sync after an abort proceeds. `undefined`: no abort mark, or a history
+ *  rewrite already forces a rebuild. `"resume"`: the settle window has passed, CC wrote
+ *  the aborted prompt, and every message pi has past the cursor belongs to the aborted
+ *  turn (its partial answer, tool calls and their results). `"rebuild"`: anything else,
+ *  including a user message CC never saw. */
+export function postAbortSync(
+	state: (AbortMark & { sessionId: string; cursor: number; needsRebuild?: boolean }) | null,
+	priorMessages: { role?: string }[],
+	cwd: string,
+	now = Date.now(),
+): "resume" | "rebuild" | undefined {
+	if (!state || state.abortedAt === undefined || state.needsRebuild) return undefined;
+	const resumable = now - state.abortedAt >= ABORT_SETTLE_MS
+		&& priorMessages.length >= state.cursor
+		&& priorMessages.slice(state.cursor).every((m) => m.role !== "user")
+		&& abortedPromptPersisted(state.sessionId, state, cwd);
+	return resumable ? "resume" : "rebuild";
+}
