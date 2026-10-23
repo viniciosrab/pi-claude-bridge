@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Fix: the turn after an abort re-cached the whole conversation** — an abort made the next prompt rebuild Claude Code's session from pi's history, and a rebuilt file lacks the context blocks CC writes at its head, so the first request missed the cache from `messages[0]` (live: 22,419 tokens written vs 108 now). Once the killed CLI has had 3 s to settle, the next prompt resumes CC's own session across the aborted turn, as native Claude Code does after Esc; a sync inside that window, a history rewrite, a user message CC never saw, or an aborted prompt CC never recorded still rebuilds as before.
 - **Bump: Claude Agent SDK 0.3.308 (Claude Code 2.1.308)** — Claude Code's new per-request log in session files is turned off; it made them about a third larger.
 - **Fix: queued steering keeps MCP input open through later turns (#172)** — Keep Claude Code's input open until each steer is replayed into a turn, then close after that turn completes. An error result still ends the query, so a steer Claude Code had queued can no longer run on and replace the failure. Thanks @Maverobot.
 - **Fix: abort ignored after a terminated tool batch (#200, issue #199)** — when a run ended with Claude Code's query parked at a tool call (`terminate: true`), aborting the next run did nothing. Each run that continues the query now binds its own signal. Thanks @orshih6 and @cootue.
