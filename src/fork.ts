@@ -7,9 +7,11 @@
 // edit upstream lines (shared imports, the Config interface, upstream tests or README),
 // add a hook line next to them instead.
 
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { getSessionPath } from "cc-session-io";
-import { readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
@@ -162,4 +164,100 @@ export function postAbortSync(
 		&& priorMessages.slice(state.cursor).every((m) => m.role !== "user")
 		&& abortedPromptPersisted(state.sessionId, state, cwd);
 	return resumable ? "resume" : "rebuild";
+}
+
+// Resume after reopening. The bridge keeps each pi session's Claude Code session in
+// memory, so a pi session continued in a new process (a new window, `pi --continue`,
+// `/resume`) found none and rebuilt the whole conversation, re-caching all of it. Each
+// completed turn now records its CC session in a small file per pi session, and the
+// first sync of a new process resumes that session when pi's history still matches it.
+
+/** What a completed turn records about its pi session's CC session. */
+export interface MirrorRecord {
+	sessionId: string;
+	// History messages CC's session covers, as syncSharedSession counts them.
+	cursor: number;
+	cwd: string;
+	// Of the history the cursor covers, which a reopened history must start with.
+	fingerprint: string;
+	fingerprintLength: number;
+	// The process that wrote it: a CC session file never has two live writers.
+	pid: number;
+}
+
+const MIRROR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function mirrorDir(): string {
+	return join(getAgentDir(), "claude-bridge-mirrors");
+}
+
+function mirrorPath(piSessionId: string): string {
+	return join(mirrorDir(), `${encodeURIComponent(piSessionId)}.json`);
+}
+
+/** Identifies a history by each message's role and timestamp, which pi keeps
+ *  across processes and changes whenever it rewrites a message. */
+export function historyFingerprint(messages: { role?: string; timestamp?: number }[]): string {
+	const hash = createHash("sha256");
+	for (const m of messages) hash.update(`${m.role}:${m.timestamp}\n`);
+	return hash.digest("hex");
+}
+
+let mirrorsPruned = false;
+function pruneMirrors(now: number): void {
+	if (mirrorsPruned) return;
+	mirrorsPruned = true;
+	try {
+		for (const name of readdirSync(mirrorDir())) {
+			const file = join(mirrorDir(), name);
+			if (now - statSync(file).mtimeMs > MIRROR_MAX_AGE_MS) rmSync(file, { force: true });
+		}
+	} catch {}
+}
+
+/** Records a pi session's CC session after a completed turn. Best effort: a
+ *  failure only means the next process rebuilds, as before. */
+export function saveMirror(piSessionId: string, record: Omit<MirrorRecord, "pid">, now = Date.now()): void {
+	try {
+		mkdirSync(mirrorDir(), { recursive: true });
+		pruneMirrors(now);
+		const file = mirrorPath(piSessionId);
+		writeFileSync(`${file}.tmp`, JSON.stringify({ ...record, pid: process.pid }));
+		renameSync(`${file}.tmp`, file);
+	} catch {}
+}
+
+/** Forgets a pi session's CC session, so no process resumes a file pi's history has left. */
+export function dropMirror(piSessionId: string): void {
+	try { rmSync(mirrorPath(piSessionId), { force: true }); } catch {}
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** The CC session a new process may resume for `piSessionId`, or null to rebuild:
+ *  nothing recorded, another cwd, CC's file gone, another live process using it,
+ *  or a history that no longer starts with the turn CC completed. */
+export function loadMirror(piSessionId: string, history: { role?: string; timestamp?: number }[], cwd: string): { sessionId: string; cursor: number } | null {
+	let record: MirrorRecord;
+	try {
+		record = JSON.parse(readFileSync(mirrorPath(piSessionId), "utf8")) as MirrorRecord;
+	} catch {
+		return null;
+	}
+	if (record.cwd !== cwd || !existsSync(getSessionPath(record.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR))) return null;
+	if (record.pid !== process.pid && processAlive(record.pid)) return null;
+	// The cursor's messages unchanged, followed by the turn's final answer: a history
+	// branched inside that turn (say, /tree back to a tool result) dropped the answer
+	// CC's file still ends with.
+	if (record.fingerprintLength !== record.cursor || history.length <= record.cursor) return null;
+	if ((history[record.cursor] as { role?: string }).role !== "assistant") return null;
+	if (historyFingerprint(history.slice(0, record.cursor)) !== record.fingerprint) return null;
+	return { sessionId: record.sessionId, cursor: record.cursor };
 }
