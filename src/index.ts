@@ -6,6 +6,7 @@ import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/res
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
+import { withProviderSettingSources } from "./fork.js";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
@@ -854,11 +855,13 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 
 // The SDK's query(), or a test double (see setQuery).
 let queryImpl: typeof query = query;
+queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
 
 // @internal
 export const __test = {
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
+		queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
 	},
 	resetSharedSession(piSessionId?: string | null) {
 		// No id: full reset (the pre-map semantics — tests start from a blank slate).
