@@ -355,6 +355,32 @@ ensure_git_head() {
     fail "gitHead $GIT_HEAD not found in $UPSTREAM_REMOTE history"
 }
 
+# release_needs <source> <commit>...: print the commits the release at $GIT_HEAD still needs,
+# in order. Two kinds are skipped, since their cherry-pick would only conflict:
+# - a commit whose patch the release already has under another SHA (`git cherry` marks it
+#   `-`), such as an upstream commit upstream later rewrote;
+# - a fix with a `Mirror-Drop-After: <upstream commit>` trailer when the release contains that
+#   commit: upstream superseded the fix there (see docs/mirror.md).
+release_needs() {
+  local source="$1" mark c drop; shift
+  local -A shipped=()
+  while read -r mark c; do
+    [[ "$mark" == "-" ]] && shipped[$c]=1
+  done < <(git cherry "$GIT_HEAD" "$source")
+  for c in "$@"; do
+    if [[ -n "${shipped[$c]:-}" ]]; then
+      log "dropped $(git log -1 --format='%h %s' "$c") (the release already has it)"
+      continue
+    fi
+    drop="$(git log -1 --format='%(trailers:key=Mirror-Drop-After,valueonly)' "$c" | head -n1)"
+    if [[ "$drop" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$drop" "$GIT_HEAD" 2>/dev/null; then
+      log "dropped $(git log -1 --format='%h %s' "$c") (superseded by upstream ${drop:0:7})"
+      continue
+    fi
+    printf '%s\n' "$c"
+  done
+}
+
 # Cherry-pick the fix commits of <source> onto the worktree HEAD (= gitHead). The fix commits
 # are those on <source> that upstream history does not contain; this equals
 # merge-base(source, gitHead)..source in the normal case, but stays correct when gitHead is
@@ -368,10 +394,12 @@ apply_patches() {
     return 0
   fi
   local base; base="$(git rev-parse "${commits[0]}^")"
-  log "applying ${#commits[@]} fix commit(s) from $source (base ${base:0:7})"
+  local listed=${#commits[@]}
+  mapfile -t commits < <(release_needs "$source" "${commits[@]}")
+  log "applying ${#commits[@]} of $listed fix commit(s) from $source (base ${base:0:7})"
 
   # Same upstream release as last time: reuse the existing commits (stable SHAs).
-  if [[ "$base" == "$GIT_HEAD" ]]; then
+  if [[ "$base" == "$GIT_HEAD" && ${#commits[@]} -eq $listed ]]; then
     git -C "$WORKTREE" checkout --quiet --detach "$source"
     log "fix commits already sit on ${GIT_HEAD:0:7}; using them as-is"
     return 0
