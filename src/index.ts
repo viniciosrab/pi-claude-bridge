@@ -8,7 +8,6 @@ import { createSession, deleteSession, openSession, repairToolPairing } from "cc
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
-import { abortedTurnAtStart, abortMark, dropMirror, historyFingerprint, loadMirror, postAbortSync, providerSettingSourcesOption, saveMirror, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
@@ -209,7 +208,6 @@ interface SessionState {
 	// with no query in flight does NOT set this — there's no concurrent CC writer
 	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
-	abortedAt?: AbortMark["abortedAt"]; abortedPrompt?: AbortMark["abortedPrompt"]; abortedFileOffset?: AbortMark["abortedFileOffset"]; // fork: abort resume
 }
 
 /**
@@ -300,7 +298,6 @@ function markRebuildForSession(piSession: string | null, event: string): void {
 	// built from, so its next sync must REBUILD rather than REUSE. Every other
 	// session's mirror stays untouched — its conversation was never rewritten.
 	const key = sessionKey(piSession);
-	if (piSession) dropMirror(piSession); // fork: reopen resume
 	const state = sharedSessions.get(key);
 	if (!state) {
 		debug(`${event}: history rewritten, no session to mark yet`);
@@ -769,13 +766,9 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// every read and write below addresses sessionStateFor(piSessionId), so a
 	// foreign session's shape-matching context can never REUSE or rebuild another
 	// session's CC file.
-	if (piSessionId && !sessionStateFor(piSessionId)) restoreMirror(piSessionId, nonSystemMessages(messages), cwd); // fork: reopen resume
 	const sharedSession = sessionStateFor(piSessionId);
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
-	const forkAbort = postAbortSync(sharedSession, priorMessages, cwd); // fork: abort resume
-	if (forkAbort === "resume") return resumeAfterAbort(piSessionId, sharedSession!, priorMessages.length, cwd); // fork: abort resume
-	if (forkAbort === "rebuild") sharedSession!.needsRebuild = true; // fork: abort resume
 
 	// REUSE path
 	//
@@ -897,7 +890,6 @@ export const __test = {
 	},
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
-		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
 	},
 	toBridgeContext,
 	isolatedStreamFn,
@@ -1721,64 +1713,6 @@ async function deliverToolResults(
 	}
 }
 
-/** fork: reopen resume. A pi session with no mirror in this process (a new window,
- *  `pi --continue`, `/resume`) takes back the CC session its last completed turn
- *  recorded, when pi's history still matches it; see src/fork.ts loadMirror. */
-function restoreMirror(piSessionId: string, history: Context["messages"], cwd: string): void {
-	const restored = loadMirror(piSessionId, history, cwd);
-	if (!restored) return;
-	setSessionStateFor(piSessionId, { sessionId: restored.sessionId, cursor: restored.cursor, cwd, piSessionId });
-	debug(`reopen: restored session ${restored.sessionId.slice(0, 8)} for pi session ${piSessionId.slice(0, 8)}, cursor=${restored.cursor}`);
-}
-
-/** fork: reopen resume. The newest context a query was sent: the one carrying the
- *  tool results delivered to it, which its completion's cursor counts. */
-const latestSent = new WeakMap<QueryContext, Context["messages"]>();
-
-/** fork: reopen resume. Records a completed turn's CC session for a later process,
- *  fingerprinting every message the cursor covers; a mirror due for a rebuild, or
- *  one whose covered messages this query never saw, is forgotten instead. */
-function recordMirror(c: QueryContext, sent: Context["messages"], cwd: string): void {
-	if (!c.piSessionId) return;
-	const state = sessionStateFor(c.piSessionId);
-	const latest = latestSent.get(c);
-	const history = nonSystemMessages(latest && latest.length > sent.length ? latest : sent);
-	if (!state || state.needsRebuild || state.cursor !== history.length) return dropMirror(c.piSessionId);
-	saveMirror(c.piSessionId, { sessionId: state.sessionId, cursor: state.cursor, cwd, fingerprint: historyFingerprint(history), fingerprintLength: history.length });
-}
-
-/** fork: abort resume. Records an aborted query on its own session's mirror, after
- *  upstream's needsRebuild + forceRotate marking: the next sync resumes CC's own file
- *  once src/fork.ts postAbortSync allows it, and rebuilds on a rotated id otherwise.
- *  `prior` is the mirror before the abort, so a rewrite or missed steer still rebuilds.
- *  An ephemeral (preserve-shared) query keeps upstream's marking of its parent. */
-function markAbortedSession(c: QueryContext, prior: SessionState | null, capturedSessionId: string | undefined, cursor: number, cwd: string, preserveShared: boolean, turn: AbortedTurn): void {
-	// The killed CLI may still write its file: no later process resumes it from disk.
-	if (c.piSessionId) dropMirror(c.piSessionId);
-	if (preserveShared) return;
-	const sessionId = capturedSessionId ?? prior?.sessionId;
-	if (!sessionId) return;
-	setSessionStateFor(c.piSessionId, {
-		...prior,
-		sessionId,
-		cursor: Math.max(cursor, prior?.cursor ?? 0),
-		cwd,
-		piSessionId: c.piSessionId ?? undefined,
-		needsRebuild: c.missedSteer || prior?.needsRebuild,
-		forceRotate: true,
-		...abortMark(turn, sessionId),
-	});
-	debug(`provider: abort recorded, session ${sessionId.slice(0, 8)} resumes once settled`);
-}
-
-/** fork: abort resume. REUSE across an aborted turn, clearing the abort mark. */
-function resumeAfterAbort(piSessionId: string | null, state: SessionState, cursor: number, cwd: string): SyncResult {
-	setSessionStateFor(piSessionId, { ...state, cursor, cwd, abortedAt: undefined, abortedPrompt: undefined, abortedFileOffset: undefined, forceRotate: undefined });
-	debug(`Case 3 post-abort: resuming session ${state.sessionId.slice(0, 8)} across the aborted turn, cursor=${cursor}`);
-	debug(`syncResult: path=reuse sessionId=${state.sessionId} cursor=${cursor} post-abort`);
-	return { sessionId: state.sessionId };
-}
-
 /** Abort teardown for one query: settle everything that would otherwise be left
  *  awaiting a subprocess we are about to kill. The pump abandons iteration on
  *  abort, so an in-flight prompt-stream push would hang forever and take
@@ -1923,7 +1857,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		const state = sessionStateFor(resultCtx.piSessionId);
 		if (state) state.cursor = context.messages.length;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
-		latestSent.set(resultCtx, context.messages); // fork: reopen resume
 		return stream;
 	}
 
@@ -2024,7 +1957,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
-	latestSent.delete(queryCtx); // fork: reopen resume
 	// The served pi session, for rewrite attribution on delivery (issue #101
 	// follow-up) and on SessionState. A fresh instance of this module inside a
 	// worktree-spawned subagent has its own contexts; each records its own.
@@ -2088,7 +2020,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// that `isSingleUserTurn` is false, so the SDK no longer closes stdin on the
 	// first result — consumeQuery ends the stream explicitly instead, or the
 	// query would never terminate.
-	const abortedTurn = abortedTurnAtStart(promptBlocks, promptText, resumeSessionId, cwd); // fork: abort resume
 	const promptStream = makePromptStream();
 	void promptStream.push(userMessage(promptBlocks ?? [{ type: "text", text: promptText }]))
 		.catch((error) => debug(`provider: initial prompt push rejected:`, error));
@@ -2160,7 +2091,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		`ctxFiles=${promptCapture?.contextFiles.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
-	Object.assign(queryOptions, providerSettingSourcesOption(providerSettings)); // fork: provider.loadClaudeSettings
 	// 3. Start SDK query and claim it for this context
 	let wasAborted = false;
 	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
@@ -2224,7 +2154,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				// JSONL — its own mirror's next sync must rebuild and rotate.
 				const state = sessionStateFor(queryCtx.piSessionId);
 				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
-				markAbortedSession(queryCtx, state, capturedSessionId, Math.max(context.messages.length, queryCtx.latestCursor), cwd, Boolean(syncResult.preserveSharedSession), abortedTurn); // fork: abort resume
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
 				// A turn whose stream already ended was returned to pi; failing it now
 				// would rewrite a message pi has recorded.
@@ -2260,7 +2189,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
 					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
-					recordMirror(queryCtx, context.messages, cwd); // fork: reopen resume
 				}
 			}
 
@@ -2279,14 +2207,12 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			if ((wasAborted || options?.signal?.aborted)) {
 				const state = sessionStateFor(queryCtx.piSessionId);
 				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
-				markAbortedSession(queryCtx, state, undefined, Math.max(context.messages.length, queryCtx.latestCursor), cwd, Boolean(syncResult.preserveSharedSession), abortedTurn); // fork: abort resume
 				queryCtx.heldRateLimit = undefined;
 			} else {
 				// Drop this session's mirror: its conversation is in an unknown
 				// state after the error. Other sessions' mirrors stay — one
 				// session's failure says nothing about another's conversation.
 				setSessionStateFor(queryCtx.piSessionId, null);
-				if (queryCtx.piSessionId) dropMirror(queryCtx.piSessionId); // fork: reopen resume
 			}
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput && queryCtx.currentPiStream) {
@@ -2582,7 +2508,6 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
-		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
 		piMode = ctx.mode;
 		rememberSessionCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
