@@ -1492,6 +1492,9 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
  *  an assistant message (completed blocks). On tool_use, the stream is ended by
  *  whichever path handles it first (processStreamEvent or processAssistantMessage),
  *  and the MCP handler blocks the generator until pi delivers the tool result. */
+/** Numbers the debug log's timing lines, so concurrent queries stay apart. */
+let timedQueries = 0;
+
 async function consumeQuery(
 	sdkQuery: ReturnType<typeof query>,
 	customToolNameToPi: Map<string, string>,
@@ -1500,8 +1503,26 @@ async function consumeQuery(
 	queryCtx: QueryContext,
 ): Promise<{ capturedSessionId?: string }> {
 	let capturedSessionId: string | undefined;
+	// Debug-only latency split. Nothing awaits between query() and this call, so
+	// launch time is the spawn: spawn→init is Claude Code's own start-up, and a
+	// result's cc minus api is the time it spent outside the API.
+	const launchedAt = performance.now();
+	const sinceLaunch = () => Math.round(performance.now() - launchedAt);
+	const timingId = `q${++timedQueries}`;
+	let timedInit = false, timedFirstToken = false;
 
 	for await (const message of sdkQuery) {
+		if (DEBUG) {
+			if (!timedInit && message.type === "system" && message.subtype === "init") {
+				timedInit = true;
+				debug(`timing: query=${timingId} spawn→init=${sinceLaunch()}ms`);
+			} else if (!timedFirstToken && message.type === "stream_event" && message.parent_tool_use_id === null && message.event.type === "content_block_delta") {
+				timedFirstToken = true;
+				debug(`timing: query=${timingId} first token=${sinceLaunch()}ms`);
+			} else if (message.type === "result") {
+				debug(`timing: query=${timingId} result elapsed=${sinceLaunch()}ms cc=${message.duration_ms}ms api=${message.duration_api_ms}ms`);
+			}
+		}
 		// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery
 		// sees, one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to
 		// capture replay fixtures, so unit tests assert against message shapes Claude
