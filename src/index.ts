@@ -1487,13 +1487,21 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	}
 }
 
+/** Numbers the debug log's timing lines, so concurrent queries stay apart. */
+let timedQueries = 0;
+/** The last duration_api_ms seen per Claude Code session. A result's duration_api_ms
+ *  is CC's running total for the session, carried across --resume (pinned in
+ *  tests/int-cc-contracts.mjs), so a turn's own API time is the difference. A turn
+ *  takes its session's entry when it starts and puts it back only with its result,
+ *  so a turn that ends without one leaves the next turn's API time unknown rather
+ *  than charged with the unfinished turn's. */
+const apiTotalBySession = new Map<string, number>();
+
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
  *  Runs until the query ends. Per turn, the SDK yields stream_events (deltas), then
  *  an assistant message (completed blocks). On tool_use, the stream is ended by
  *  whichever path handles it first (processStreamEvent or processAssistantMessage),
  *  and the MCP handler blocks the generator until pi delivers the tool result. */
-/** Numbers the debug log's timing lines, so concurrent queries stay apart. */
-let timedQueries = 0;
 
 async function consumeQuery(
 	sdkQuery: ReturnType<typeof query>,
@@ -1501,6 +1509,7 @@ async function consumeQuery(
 	model: Model<any>,
 	wasAborted: () => boolean,
 	queryCtx: QueryContext,
+	newSession: boolean,
 ): Promise<{ capturedSessionId?: string }> {
 	let capturedSessionId: string | undefined;
 	// Debug-only latency split. Nothing awaits between query() and this call, so
@@ -1510,9 +1519,17 @@ async function consumeQuery(
 	const sinceLaunch = () => Math.round(performance.now() - launchedAt);
 	const timingId = `q${++timedQueries}`;
 	let timedInit = false, timedFirstToken = false;
+	// The session total before the open turn: undefined while unknown.
+	let turnOpen = false, turnPrev: number | undefined;
+	const priorTotal = (sessionId: string) => apiTotalBySession.get(sessionId) ?? (newSession ? 0 : undefined);
 
 	for await (const message of sdkQuery) {
 		if (DEBUG) {
+			if (!turnOpen && capturedSessionId && message.type === "stream_event" && message.parent_tool_use_id === null && message.event.type === "message_start") {
+				turnOpen = true;
+				turnPrev = priorTotal(capturedSessionId);
+				apiTotalBySession.delete(capturedSessionId);
+			}
 			if (!timedInit && message.type === "system" && message.subtype === "init") {
 				timedInit = true;
 				debug(`timing: query=${timingId} spawn→init=${sinceLaunch()}ms`);
@@ -1520,7 +1537,15 @@ async function consumeQuery(
 				timedFirstToken = true;
 				debug(`timing: query=${timingId} first token=${sinceLaunch()}ms`);
 			} else if (message.type === "result") {
-				debug(`timing: query=${timingId} result elapsed=${sinceLaunch()}ms cc=${message.duration_ms}ms api=${message.duration_api_ms}ms`);
+				// Spent before this turn: nothing on a session this query created; unknown on
+				// a resumed one the bridge has not seen, after a turn that ended without a
+				// result, or once the total goes backwards.
+				const total = message.duration_api_ms;
+				const prev = turnOpen ? turnPrev : priorTotal(message.session_id);
+				const api = prev !== undefined && total >= prev ? `${total - prev}ms` : "?";
+				debug(`timing: query=${timingId} result elapsed=${sinceLaunch()}ms cc=${message.duration_ms}ms api=${api} apiTotal=${total}ms`);
+				apiTotalBySession.set(message.session_id, total);
+				turnOpen = false;
 			}
 		}
 		// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery
@@ -2207,7 +2232,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.bindRunSignal = bindRunSignal;
 
 	// Background consumer — runs until query ends
-	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx)
+	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx, !resumeSessionId)
 		.then(async ({ capturedSessionId }) => {
 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
 

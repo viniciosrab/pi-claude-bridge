@@ -417,6 +417,31 @@ test("--resume re-reads the JSONL from disk on every call", { timeout: 180_000 }
 	assert.doesNotMatch(second, /foxglove/i, `CC served stale content for the same UUID: ${second}`);
 });
 
+test("a resumed result's duration_api_ms is the session's running total, its duration_ms this turn's", { timeout: 180_000 }, async () => {
+	// The bridge's debug timing line subtracts the total it last saw for the CC
+	// session (src/index.ts consumeQuery). If CC ever reports API time per turn,
+	// that subtraction would log near-zero turns, so pin both fields. Turn 1 is
+	// long and turn 2 short: a per-turn API time can never exceed its own turn.
+	const turn = async (prompt, resume) => {
+		const startedAt = performance.now();
+		const { result } = await collect(query({ prompt, options: providerOptions({ maxTurns: 1, ...(resume ? { resume } : {}) }) }));
+		assert.equal(result?.subtype, "success", `turn failed: ${JSON.stringify(result)}`);
+		return { result, wallMs: performance.now() - startedAt };
+	};
+
+	const first = await turn("Count from 1 to 80, numbers separated by single spaces, nothing else.");
+	const second = await turn("Reply OK.", first.result.session_id);
+	const [r1, r2] = [first.result, second.result];
+	console.log(`turn 1: duration_ms=${r1.duration_ms} duration_api_ms=${r1.duration_api_ms}; turn 2 (resumed): duration_ms=${r2.duration_ms} duration_api_ms=${r2.duration_api_ms} wall=${Math.round(second.wallMs)}ms`);
+
+	assert.equal(r2.session_id, r1.session_id, "the resume did not continue the same CC session");
+	assert.ok(r2.duration_ms <= second.wallMs, `duration_ms ${r2.duration_ms} exceeds turn 2's own wall time ${Math.round(second.wallMs)}ms: no longer per turn`);
+	assert.ok(r2.duration_api_ms > r1.duration_api_ms, `duration_api_ms ${r2.duration_api_ms} did not grow past turn 1's ${r1.duration_api_ms}: no longer a running total`);
+	assert.ok(r2.duration_api_ms > r2.duration_ms, `duration_api_ms ${r2.duration_api_ms} fits inside turn 2's ${r2.duration_ms}ms: it may be per turn now`);
+	assert.ok(r2.duration_api_ms - r1.duration_api_ms <= r2.duration_ms,
+		`the growth ${r2.duration_api_ms - r1.duration_api_ms}ms exceeds turn 2's duration_ms ${r2.duration_ms}: the difference is not this turn's API time`);
+});
+
 test("arbitrary sanitized tool_use ids in an imported transcript resume fine", { timeout: 120_000 }, async () => {
 	// convert.ts sanitizeToolId only strips characters outside [A-Za-z0-9_-]; the
 	// result keeps pi's own id shape rather than CC's toolu_* form.
