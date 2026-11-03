@@ -844,6 +844,9 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 
 	// REBUILD path
 	if (priorMessages.length === 0) {
+		// A retry of a failed first turn starts clean: drop the error mark with the
+		// state, or it would survive this query and rebuild the next turn. // fork: error resume
+		if (sharedSession?.errorResult) { setSessionStateFor(piSessionId, null); if (piSessionId) dropMirror(piSessionId); }
 		debug(`Case 1: clean start, ${history.length} total messages`);
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };

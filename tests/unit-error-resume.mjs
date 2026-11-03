@@ -364,6 +364,14 @@ describe("the turn after a failure that cannot resume", () => {
 		await call(P, [u1]).result();
 		assert.notEqual(calls.at(-1).resume, id, "never resumed with the failed prompt still in the chain");
 		assert.equal(calls.at(-1).resumeSessionAt, undefined);
+
+		// The retry's clean start owns the session now: the next prompt resumes it
+		// instead of rebuilding off the stale error mark (CodeRabbit on PR #24).
+		assert.equal(getSharedSession(P)?.sessionId, "cc-x");
+		assert.equal(getSharedSession(P)?.errorResult, undefined, "the error mark is gone");
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, say("ok"), user("next")]).result();
+		assert.equal(calls.at(-1).resume, "cc-x", "resumes the retry's session, no rebuild");
 	});
 });
 
