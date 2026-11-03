@@ -12,6 +12,8 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { QueryContext } from "../src/query-state.js";
@@ -152,6 +154,37 @@ describe("a handler waiting on a tool call pi never received", () => {
 		} finally {
 			process.env.PI_CODING_AGENT_DIR = previous;
 		}
+	});
+
+	// The debug log is written on every step of that teardown, and only when
+	// CLAUDE_BRIDGE_DEBUG=1, which is read at import, so this runs in a child process.
+	it("still ends the turn when the debug log cannot be written either", () => {
+		const blocker = join(mkdtempSync(join(tmpdir(), "debug-blocked-")), "file");
+		writeFileSync(blocker, "");
+		const repo = fileURLToPath(new URL("..", import.meta.url));
+		const script = `
+			process.env.CLAUDE_BRIDGE_DEBUG_PATH = ${JSON.stringify(join(blocker, "debug.log"))};
+			process.env.PI_CODING_AGENT_DIR = ${JSON.stringify(join(blocker, "agent"))};
+			const { QueryContext } = await import("./src/query-state.ts");
+			const { __test } = await import("./src/index.ts");
+			const c = new QueryContext();
+			c.lostCallTimeoutMs = 20;
+			const events = [];
+			c.currentPiStream = { push: (e) => events.push(e), end: () => events.push({ type: "end" }) };
+			c.resetTurnState({ api: "anthropic-messages", provider: "anthropic", id: "m" });
+			c.activeQuery = { interrupt: async () => {}, close: () => {} };
+			c.promptStream = { fail: () => {} };
+			__test.activeQueryContexts.add(c);
+			const [def] = __test.toMcpToolDefs([{ name: "bash", description: "b", parameters: { type: "object", properties: {} } }], c);
+			const alive = setInterval(() => {}, 1000); // the watchdog timer is unref'd
+			await def.handler("toolu_unlogged");
+			clearInterval(alive);
+			if (!events.some((e) => e.type === "end")) throw new Error("pi's stream did not end");
+			console.log("TEARDOWN_OK");`;
+		const out = execFileSync(process.execPath, ["--import", "tsx", "--import", "./tests/lib/setup.mjs", "--input-type=module", "-e", script], {
+			cwd: repo, env: { ...process.env, CLAUDE_BRIDGE_DEBUG: "1" }, encoding: "utf8", timeout: 20_000,
+		});
+		assert.match(out, /TEARDOWN_OK/);
 	});
 
 	it("ends the query even when pi is still running the calls it did get", async () => {

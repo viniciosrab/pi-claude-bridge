@@ -88,7 +88,8 @@ function debug(...args: unknown[]) {
 		return JSON.stringify(a);
 	};
 	const msg = args.map(fmt).join(" ");
-	appendFileSync(logPath, `[${ts}] [${moduleInstanceId}] ${msg}\n`);
+	// A debug line is never worth failing the caller over (a read-only or full disk).
+	try { appendFileSync(logPath, `[${ts}] [${moduleInstanceId}] ${msg}\n`); } catch { /* ignore */ }
 }
 
 // Per-query CLI debug capture. When CLAUDE_BRIDGE_DEBUG=1, ask the Claude Code
