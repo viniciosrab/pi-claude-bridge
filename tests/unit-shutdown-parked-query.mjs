@@ -193,4 +193,29 @@ describe("session_shutdown (upstream #210 port)", () => {
 		await call(P, [u1, a1, u2, a2, u3]).result();
 		assert.equal(calls.at(-1).resume, `cc-${P}`);
 	});
+
+	it("a shutdown between the abort signal and the query's end still ends the turn and keeps the mark", { timeout: 8000 }, async () => {
+		const P = "pi-shutdown-mid-abort", id = `cc-${P}`;
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([{ type: "text", text: "partial" }]), u3 = user("next");
+		scripts.push({ label: "turn 1", steps: [init(id), result("first answer")] });
+		await call(P, [u1]).result();
+		const controller = new AbortController();
+		const script = { label: "turn 2", steps: [init(id), ...text("partial"), HANG, result("never")], cli: CLI_EXITS };
+		scripts.push(script);
+		const turn2 = call(P, [u1, a1, u2], controller.signal);
+		await settle();
+		controller.abort();
+		shutdown(P); // the aborted query has not completed yet
+		const out = await Promise.race([turn2.result(), new Promise((r) => setTimeout(() => r({ stopReason: "no terminal event" }), 1000))]);
+		assert.equal(out.stopReason, "aborted", "the aborted turn's stream still ends");
+		assert.ok(existsSync(mirrorFile(P)) && JSON.parse(readFileSync(mirrorFile(P), "utf8")).abortedAt, "the abort mark is on disk");
+		if (!exited(script.proc)) await once(script.proc, "exit");
+		ccWritesSession(id, ["first", "long essay"]);
+		reload();
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+		assert.equal(calls.at(-1).resume, id, "the next prompt resumes CC's own session");
+		const { ctx } = await import("../src/query-state.js");
+		assert.equal(ctx().aborting, false, "a later query on the reused context is not taken for an aborting one");
+	});
 });

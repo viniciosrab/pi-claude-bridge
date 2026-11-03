@@ -1036,6 +1036,9 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
 function closeSessionQueries(piSessionId: string): void {
 	for (const c of [...activeQueryContexts]) {
 		if (c.piSessionId !== piSessionId) continue;
+		// An abort already killing this CLI ends its own turn and records the abort mark
+		// a later resume needs; discarding it here would skip both.
+		if (c.aborting) { debug("session_shutdown: leaving an aborting query to its own teardown"); continue; }
 		debug(
 			`${c.activeQuery ? "session_shutdown: closing parked query" : "WARNING: session_shutdown left a context with no query"} — `
 			+ `pendingToolCalls=${c.pendingToolCalls.size} promptStream=${c.promptStream !== null}`,
@@ -2177,6 +2180,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	let wasAborted = false;
 	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
 	queryCtx.activeQuery = sdkQuery;
+	queryCtx.aborting = false; // the top-level context is reused across queries
 	activeQueryContexts.add(queryCtx);
 
 	// 4. Capture context for abort handling
@@ -2191,6 +2195,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const onAbort = () => {
 		if (wasAborted) return;
 		wasAborted = true;
+		abortCtx.aborting = true;
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
