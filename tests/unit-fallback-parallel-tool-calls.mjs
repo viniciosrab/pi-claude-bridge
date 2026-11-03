@@ -156,6 +156,33 @@ describe("non-streaming fallback delivered one block per assistant message", () 
 		assert.strictEqual(c.turnOutput.errorMessage, "API Error: 529 overloaded");
 	});
 
+	// The settle timer fires and queues its setImmediate; an error result read in the
+	// same loop turn, before that callback runs, must still win (CodeRabbit on PR #22).
+	// setImmediate is held so the interleaving is exact rather than timing-dependent.
+	it("leaves the turn failed when an error result lands between the settle timer and its setImmediate", async () => {
+		const c = makeCtx();
+		const stream = c.currentPiStream;
+		const failed = { type: "result", subtype: "success", is_error: true, result: "API Error: 529 overloaded" };
+		const held = [];
+		const realSetImmediate = globalThis.setImmediate;
+		globalThis.setImmediate = (fn, ...args) => { held.push(() => fn(...args)); };
+		try {
+			async function* gen() {
+				yield* [...deadStream, ...fallbackBlocks];
+				while (held.length === 0) await new Promise((r) => setTimeout(r, 10)); // the settle timer fired
+				yield failed;
+			}
+			await __test.consumeQuery(gen(), toolMap, fakeModel, () => false, c);
+		} finally {
+			globalThis.setImmediate = realSetImmediate;
+		}
+		assert.strictEqual(held.length, 1);
+		held[0]();
+
+		assert.strictEqual(stream.events.find((e) => e.type === "done"), undefined);
+		assert.strictEqual(c.turnOutput.stopReason, "error");
+	});
+
 	it("still ends a single-call fallback on toolUse", async () => {
 		const c = makeCtx();
 		const stream = c.currentPiStream;

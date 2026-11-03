@@ -1392,6 +1392,9 @@ function settleFallbackToolUse(c: QueryContext, stream: AssistantMessageEventStr
 		// Timers run ahead of the poll phase, so after a stalled event loop this can fire
 		// with the next block already read but not yet delivered. Check again once it has been.
 		setImmediate(() => {
+			// clearToolUseSettle cannot recall this callback once the timer has fired; an
+			// error result or abort read in between leaves the wait cleared or replaced.
+			if (c.toolUseSettle?.timer !== timer) return;
 			if (c.currentPiStream !== stream || c.toolUseSettleSeq !== seq) return;
 			debug(`processAssistantMessage: fallback settled on ${c.turnToolCallIds.length} tool call(s)`);
 			endTurnOnToolUse(c);
