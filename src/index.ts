@@ -764,6 +764,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 	piSessionId?: string | null,
+	isReentrant = true,
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -815,10 +816,14 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// It is NOT, despite an earlier comment here, the isolated compact-summary
 	// path: runIsolatedSummary never calls syncSharedSession at all.
 	//
-	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
+	// Reentrancy is the test rather than the message count, which is a superset:
+	// an extension that rewrites pi's history in place also shortens priors, and
+	// markRebuild only covers pi's own /compact and session_tree — there is no
+	// generic history-mutation event to hang an extension's rewrite off. Without
+	// this, a rewrite reaches CC for one query, has its session deleted here to
+	// preserve the parent's, and the next turn resumes the pre-rewrite transcript
+	// (issues #77, #55). A non-reentrant shorter context falls through to REBUILD.
+	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor && isReentrant) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
 		return { sessionId: null, preserveSharedSession: true };
@@ -2050,7 +2055,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Read before the consume below: with no query parked (an overflow retried
 	// after compaction), the session's mark is the only sign of the rewrite.
 	const historyRewritten = rewrittenUnderQuery || (piSessionId !== null && historyRewrittenBySession.has(piSessionId));
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId);
+	// Reentrant for this session's mirror only: a query of another pi session (a
+	// background subagent holding the top-level context) writes another CC file, so
+	// it must not send this session's rewritten history down the subagent path.
+	const sessionReentrant = [...activeQueryContexts].some((c) => c !== queryCtx && c.activeQuery !== null && sessionKey(c.piSessionId) === sessionKey(piSessionId));
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
