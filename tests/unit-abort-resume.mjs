@@ -12,6 +12,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { once } from "node:events";
 import { createSession, getSessionPath } from "cc-session-io";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ process.env.CLAUDE_CONFIG_DIR = claudeDir;
 process.on("exit", () => rmSync(claudeDir, { recursive: true, force: true }));
 
 const { __test } = await import("../src/index.js");
+const { deferUntilAbortSettles } = await import("../src/fork.js");
 const { setQuery, getSharedSession, resetSharedSession, markRebuildForSession } = __test;
 
 const mod = await import("../src/index.js");
@@ -35,9 +37,13 @@ const model = providerConfig.models[0];
 
 // --- fake SDK query ---
 // A step that is a function is awaited; close() releases a turn parked on
-// `hang` so the aborted query ends the way a killed CLI does.
+// `hang` so the aborted query ends the way a killed CLI does. A script with a
+// `cli` launches it as a real child through the spawnClaudeCodeProcess option
+// the bridge passes, and close() ends its stdin as the SDK does, so the child
+// stands in for the CLI's exit.
 const calls = [];
 const scripts = [];
+const children = [];
 const init = (id) => ({ type: "system", subtype: "init", session_id: id });
 const ev = (event) => ({ type: "stream_event", event });
 const text = (t) => [
@@ -55,24 +61,43 @@ beforeEach(() => {
 	setQuery(({ options }) => {
 		const script = scripts.shift();
 		if (!script) throw new Error("no fake script queued");
-		calls.push({ label: script.label, resume: options.resume });
+		calls.push({ label: script.label, resume: options.resume, at: Date.now() });
+		if (script.cli) {
+			assert.equal(typeof options.spawnClaudeCodeProcess, "function", "the bridge launches the CLI through a spawner it can watch");
+			script.proc = options.spawnClaudeCodeProcess({ command: process.execPath, args: ["-e", script.cli], env: { ...process.env, ...script.env }, signal: new AbortController().signal });
+			children.push(script.proc);
+		}
 		let release;
 		const closed = new Promise((r) => { release = r; });
 		const gen = (async function* () {
 			for (const step of script.steps) {
 				if (step === HANG) { await closed; continue; }
+				if (typeof step === "function") { await step(script); continue; }
 				yield options.resume && step.type === "system" ? { ...step, session_id: options.resume } : step;
 			}
 		})();
 		gen.interrupt = async () => {};
-		gen.close = () => release();
+		gen.close = () => { script.proc?.stdin.end(); release(); };
 		return gen;
 	});
 });
 
 afterEach(() => {
 	setQuery(null);
+	for (const child of children.splice(0)) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 });
+
+// Stand-ins for the aborted CLI. Each waits for the stdin EOF the SDK sends on close().
+const CLI_EXITS = `process.stdin.on("end", () => process.exit(0)); process.stdin.resume();`;
+// Exits LAG_MS after the EOF, first appending APPEND_LINE to APPEND_PATH when set:
+// a CLI still writing its session file as it shuts down.
+const CLI_LAGS = `process.stdin.on("end", () => setTimeout(() => {
+	if (process.env.APPEND_PATH) require("node:fs").appendFileSync(process.env.APPEND_PATH, process.env.APPEND_LINE);
+	process.exit(0);
+}, Number(process.env.LAG_MS))); process.stdin.resume();`;
+// Ignores the EOF and SIGTERM: alive until afterEach kills it.
+const CLI_STUCK = `process.on("SIGTERM", () => {}); process.stdin.resume(); setInterval(() => {}, 1000);`;
+const exited = (proc) => proc.exitCode !== null || proc.signalCode !== null;
 
 // --- pi-side message builders ---
 let clock = 0;
@@ -101,7 +126,7 @@ const ccWritesSession = (id, prompts) => {
  *  carry over between tests); turn 2 is aborted mid-stream. `ccWrote`:
  *  "prompt" — CC wrote turn 2's prompt before the kill; "before" — CC had written
  *  only turn 1 (killed before recording turn 2's prompt); "nothing" — no file. */
-async function completeThenAbort(P, turn2Messages, { ccWrote = "prompt", id = `cc-${P}` } = {}) {
+async function completeThenAbort(P, turn2Messages, { ccWrote = "prompt", id = `cc-${P}`, cli, env } = {}) {
 	const first = turn2Messages[0].content, prompt = turn2Messages.at(-1).content;
 	scripts.push({ label: "turn 1", steps: [init(id), result("first answer")] });
 	await call(P, turn2Messages.slice(0, 1)).result();
@@ -109,7 +134,8 @@ async function completeThenAbort(P, turn2Messages, { ccWrote = "prompt", id = `c
 	if (ccWrote === "before") ccWritesSession(id, [first]);
 
 	const controller = new AbortController();
-	scripts.push({ label: "turn 2", steps: [init(id), ...text("partial"), HANG, result("never")] });
+	const script = { label: "turn 2", steps: [init(id), ...text("partial"), HANG, result("never")], cli, env };
+	scripts.push(script);
 	const turn2 = call(P, turn2Messages, controller.signal);
 	await settle();
 	controller.abort();
@@ -117,6 +143,7 @@ async function completeThenAbort(P, turn2Messages, { ccWrote = "prompt", id = `c
 	assert.equal(out.stopReason, "aborted");
 	await settle();
 	if (ccWrote === "prompt") ccWritesSession(id, [first, prompt]);
+	return script.proc;
 }
 
 const sessionFile = (id) => getSessionPath(id, process.cwd(), claudeDir);
@@ -152,7 +179,7 @@ describe("the turn after an abort", () => {
 		assert.equal(getSharedSession(P).cursor, 6);
 	});
 
-	it("rebuilds on a fresh session id when it starts while the killed CLI may still write", async () => {
+	it("rebuilds on a fresh session id inside the settle window when the CLI's exit cannot be observed", async () => {
 		const P = "pi-abort-early";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
 		await completeThenAbort(P, [u1, a1, u2]);
@@ -222,6 +249,180 @@ describe("the turn after an abort", () => {
 		assert.equal(existsSync(sessionFile(resumed)), true);
 	});
 
+	it("resumes at once when the aborted CLI has already exited", async () => {
+		const P = "pi-abort-exited";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([{ type: "text", text: "partial" }]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.equal(calls.at(-1).resume, `cc-${P}`, "no settle window to wait out once the CLI is gone");
+		assert.ok(calls.at(-1).at - startedAt < 500, `the next query started ${calls.at(-1).at - startedAt}ms late`);
+		assert.equal(getSharedSession(P).abortedAt, undefined);
+	});
+
+	it("waits for a CLI still shutting down, then resumes the file it finished", async () => {
+		const P = "pi-abort-lagging";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("lagging essay"), a2 = aborted([]), u3 = user("next");
+		// CC has only turn 1 on file when the abort lands, and writes the aborted
+		// prompt as it exits: the persisted-prompt check must run after the wait.
+		const id = `cc-${P}`;
+		const env = { LAG_MS: "400", APPEND_PATH: sessionFile(id), APPEND_LINE: `${JSON.stringify({ type: "user", message: { role: "user", content: "lagging essay" } })}\n` };
+		const proc = await completeThenAbort(P, [u1, a1, u2], { ccWrote: "before", cli: CLI_LAGS, env });
+		assert.ok(!exited(proc), "the CLI is still shutting down when the next prompt arrives");
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.ok(exited(proc), "the next query waited for the CLI to exit");
+		assert.equal(calls.at(-1).resume, id, "the finished file is resumed");
+		assert.ok(calls.at(-1).at - startedAt < 2_000, `the wait lasted ${calls.at(-1).at - startedAt}ms, not just until the exit`);
+	});
+
+	it("rebuilds when the aborted CLI outlives the settle bound", async () => {
+		const P = "pi-abort-stuck";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_STUCK });
+		// 400 ms of the bound left, rather than sleeping through all of it.
+		getSharedSession(P).abortedAt -= 2_600;
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const waited = calls.at(-1).at - startedAt;
+		assert.ok(waited >= 300 && waited < 2_000, `waited ${waited}ms, not until the bound`);
+		assert.ok(!exited(proc));
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "a CLI that may still write is never shared: rebuild on a rotated id");
+		assert.equal(existsSync(sessionFile(resumed)), true);
+	});
+
+	it("stops waiting when the next turn is aborted during the wait", async () => {
+		const P = "pi-abort-stuck-abort";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		await completeThenAbort(P, [u1, a1, u2], { cli: CLI_STUCK });
+
+		const proc = children.at(-1);
+		const queriesBefore = calls.length;
+
+		const controller = new AbortController();
+		const startedAt = Date.now();
+		const turn3 = call(P, [u1, a1, u2, a2, u3], controller.signal);
+		setTimeout(() => controller.abort(), 100);
+		const out = await turn3.result();
+
+		assert.equal(out.stopReason, "aborted");
+		assert.equal(out.errorMessage, "Operation aborted");
+		assert.ok(Date.now() - startedAt < 1_500, "the abort ends the wait, not the bound");
+		assert.equal(calls.length, queriesBefore, "an abort during the wait starts no query and spawns no CLI");
+		const state = getSharedSession(P);
+		assert.equal(state.sessionId, `cc-${P}`, "the session is not rotated away from CC's own file");
+		assert.notEqual(state.abortedAt, undefined, "the first abort's mark stays for the next prompt");
+
+		// Once the first CLI is gone, retrying the prompt resumes CC's file.
+		proc.kill("SIGKILL");
+		if (!exited(proc)) await once(proc, "exit");
+		scripts.push({ label: "turn 3 retry", steps: [init("cc-y"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+		assert.equal(calls.at(-1).resume, `cc-${P}`);
+	});
+
+	it("rebuilds at once when a CLI past the bound is still alive", async () => {
+		const P = "pi-abort-stuck-late";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		await completeThenAbort(P, [u1, a1, u2], { cli: CLI_STUCK });
+		pastSettleWindow(P);
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.ok(calls.at(-1).at - startedAt < 300, "no wait past the bound");
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "the settle timer alone no longer resumes a file a live CLI holds");
+	});
+
+	it("still rebuilds after an exit when the aborted prompt never reached the file", async () => {
+		const P = "pi-abort-exited-prompt-lost";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("aborted at startup"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { ccWrote: "before", cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`);
+		assert.match(readFileSync(sessionFile(resumed), "utf8"), /aborted at startup/);
+	});
+
+	it("still rebuilds after an exit when a user message never reached Claude Code", async () => {
+		const P = "pi-abort-exited-missed-user";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), steer = user("queued steer"), a3 = say("x"), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, steer, a3, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`);
+	});
+
+	it("still rebuilds after an exit when pi rewrote the history", async () => {
+		const P = "pi-abort-exited-rewrite";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		markRebuildForSession(P, "session_compact");
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`);
+	});
+
+	it("keeps the CLI's redacted stderr tail on an exit error", async () => {
+		const P = "pi-exit-stderr";
+		const cli = `process.stderr.write("Error: Failed to authenticate. Bearer abc.def key sk-ant-api03-SECRET_value-1 token=hunter2\\n"); process.exit(1);`;
+		const failWithExit = async (script) => {
+			if (!exited(script.proc)) await once(script.proc, "exit");
+			throw new Error("Claude Code process exited with code 1");
+		};
+		scripts.push({ label: "turn 1", steps: [init("cc-e"), failWithExit], cli });
+		const out = await call(P, [user("hi")]).result();
+
+		assert.equal(out.stopReason, "error");
+		assert.match(out.errorMessage, /^Claude Code process exited with code 1\. stderr: Error: Failed to authenticate\./);
+		assert.doesNotMatch(out.errorMessage, /SECRET|hunter2|abc\.def/, "secrets in the tail are redacted");
+		assert.match(out.errorMessage, /\[REDACTED\]/);
+	});
+
+	it("leaves an exit error that already carries a stderr tail alone", async () => {
+		const P = "pi-exit-stderr-once";
+		const cli = `process.stderr.write("boom\\n"); process.exit(1);`;
+		const failWithExit = async (script) => {
+			if (!exited(script.proc)) await once(script.proc, "exit");
+			throw new Error("Claude Code process exited with code 1. stderr: boom");
+		};
+		scripts.push({ label: "turn 1", steps: [init("cc-e2"), failWithExit], cli });
+		const out = await call(P, [user("hi")]).result();
+		assert.equal(out.errorMessage, "Claude Code process exited with code 1. stderr: boom");
+	});
+
+	it("survives an error on the CLI's stderr stream", async () => {
+		const P = "pi-stderr-error";
+		scripts.push({ label: "turn 1", steps: [init("cc-s"), (script) => { script.proc.stderr.emit("error", new Error("EPIPE")); }, result("ok")], cli: CLI_EXITS });
+		const out = await call(P, [user("hi")]).result();
+		assert.equal(out.stopReason, "stop");
+	});
+
 	it("still resumes after a turn that completed normally", async () => {
 		const P = "pi-normal";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
@@ -231,5 +432,22 @@ describe("the turn after an abort", () => {
 		await call(P, [u1, a1, u2]).result();
 		assert.equal(calls.at(-1).resume, "cc-n");
 		assert.equal(getSharedSession(P).abortedAt, undefined);
+	});
+});
+
+describe("the deferred turn's relay", () => {
+	it("turns a throw from the provider into one error event and ends the stream", async () => {
+		const state = { abortedAt: Date.now(), abortedProcess: { spawned: true, exited: false, exit: Promise.resolve() } };
+		const stream = deferUntilAbortSettles(() => { throw new Error("provider blew up"); }, state, model, { messages: [] }, {});
+		assert.ok(stream, "a live CLI defers the turn");
+		const events = [];
+		for await (const event of stream) events.push(event);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].type, "error");
+		assert.equal(events[0].reason, "error");
+		assert.equal(events[0].error.stopReason, "error");
+		assert.equal(events[0].error.errorMessage, "provider blew up");
+		assert.equal(events[0].error.model, model.id);
+		assert.equal((await stream.result()).errorMessage, "provider blew up");
 	});
 });
