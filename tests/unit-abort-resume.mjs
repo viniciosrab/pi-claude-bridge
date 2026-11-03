@@ -11,7 +11,7 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { createSession, getSessionPath } from "cc-session-io";
 import { tmpdir } from "node:os";
@@ -449,5 +449,176 @@ describe("the deferred turn's relay", () => {
 		assert.equal(events[0].error.errorMessage, "provider blew up");
 		assert.equal(events[0].error.model, model.id);
 		assert.equal((await stream.result()).errorMessage, "provider blew up");
+	});
+});
+
+// --- /reload between the abort and the next prompt ---
+// pi's /reload re-imports the extension in the same OS process: every in-memory
+// mirror is gone, the files on disk and the aborted CLI (if still shutting down) are
+// not. The abort mark rides the session's mirror file to the next module instance.
+const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${encodeURIComponent(P)}.json`);
+const readMirror = (P) => JSON.parse(readFileSync(mirrorFile(P), "utf8"));
+const editMirror = (P, edit) => writeFileSync(mirrorFile(P), JSON.stringify(edit(readMirror(P))));
+/** A reloaded module: no mirror and no query in memory. */
+const reload = () => { resetSharedSession(); __test.activeQueryContexts.clear(); };
+
+describe("the turn after an abort and a /reload", () => {
+	it("resumes Claude Code's own session once the aborted CLI has exited", async () => {
+		const P = "pi-reload-exited";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([{ type: "text", text: "partial" }]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+
+		const startedAt = Date.now();
+		let markOnDiskMidTurn;
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), () => { markOnDiskMidTurn = existsSync(mirrorFile(P)); }, result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.equal(calls.at(-1).resume, `cc-${P}`, "the reloaded module resumes the aborted turn's CC session");
+		assert.equal(markOnDiskMidTurn, false, "the used-up mark leaves the disk at the resume, so a reload mid-turn cannot reuse it");
+		assert.ok(calls.at(-1).at - startedAt < 500, `the next query started ${calls.at(-1).at - startedAt}ms late`);
+		assert.doesNotMatch(readFileSync(sessionFile(`cc-${P}`), "utf8"), /first answer/, "CC's own file is resumed, not rewritten");
+		const state = getSharedSession(P);
+		assert.equal(state.cursor, 5);
+		assert.equal(state.abortedAt, undefined, "the abort mark is consumed by the resume");
+		assert.equal(readMirror(P).abortedAt, undefined, "the completed turn records a mirror without the mark");
+	});
+
+	it("waits for a CLI still shutting down, then resumes the file it finished", async () => {
+		const P = "pi-reload-lagging";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("lagging essay"), a2 = aborted([]), u3 = user("next");
+		const id = `cc-${P}`;
+		const env = { LAG_MS: "400", APPEND_PATH: sessionFile(id), APPEND_LINE: `${JSON.stringify({ type: "user", message: { role: "user", content: "lagging essay" } })}\n` };
+		const proc = await completeThenAbort(P, [u1, a1, u2], { ccWrote: "before", cli: CLI_LAGS, env });
+		assert.ok(!exited(proc), "the CLI is still shutting down when the module reloads");
+		reload();
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.ok(exited(proc), "the next query waited for the CLI to exit");
+		assert.equal(calls.at(-1).resume, id, "the finished file is resumed");
+		assert.ok(calls.at(-1).at - startedAt < 2_000, `the wait lasted ${calls.at(-1).at - startedAt}ms, not just until the exit`);
+	});
+
+	it("rebuilds on a fresh id when the aborted CLI outlives the settle bound", async () => {
+		const P = "pi-reload-stuck";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_STUCK });
+		reload();
+		// 400 ms of the bound left, rather than sleeping through all of it.
+		editMirror(P, (m) => ({ ...m, abortedAt: m.abortedAt - 2_600 }));
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const waited = calls.at(-1).at - startedAt;
+		assert.ok(waited >= 300 && waited < 2_000, `waited ${waited}ms, not until the bound`);
+		assert.ok(!exited(proc));
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "a CLI that may still write is never shared: rebuild on a rotated id");
+		assert.equal(existsSync(sessionFile(resumed)), true);
+	});
+
+	it("rebuilds when a user message after the abort point never reached Claude Code", async () => {
+		const P = "pi-reload-missed-user";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), steer = user("queued steer"), a3 = say("x"), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, steer, a3, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "CC's file lacks the steer, so pi's history is imported");
+		assert.match(readFileSync(sessionFile(resumed), "utf8"), /queued steer/);
+	});
+
+	it("rebuilds when Claude Code was killed before writing the aborted prompt", async () => {
+		const P = "pi-reload-prompt-lost";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("aborted at startup"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { ccWrote: "before", cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`);
+		assert.match(readFileSync(sessionFile(resumed), "utf8"), /aborted at startup/, "the rebuilt session carries the prompt");
+	});
+
+	it("rebuilds when pi's history no longer matches what Claude Code saw", async () => {
+		const P = "pi-reload-rewritten";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+
+		const compacted = user("summary of the conversation so far");
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [compacted, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "a different history is imported into a new session");
+		assert.match(readFileSync(sessionFile(resumed), "utf8"), /summary of the conversation/);
+	});
+
+	it("falls back to the settle window when the aborted CLI's exit cannot be observed", async () => {
+		const P = "pi-reload-untracked";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		await completeThenAbort(P, [u1, a1, u2]);
+		assert.equal(readMirror(P).abortedCliPid, undefined, "no process was tracked");
+		reload();
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+		const early = calls.at(-1).resume;
+		assert.ok(early && early !== `cc-${P}`, "inside the window the session is rotated, as before");
+
+		const Q = "pi-reload-untracked-late";
+		await completeThenAbort(Q, [u1, a1, u2]);
+		reload();
+		editMirror(Q, (m) => ({ ...m, abortedAt: m.abortedAt - 60_000 }));
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(Q, [u1, a1, u2, a2, u3]).result();
+		assert.equal(calls.at(-1).resume, `cc-${Q}`, "past the window CC's own file is resumed");
+	});
+
+	it("does not let a reused pid pass for the aborted CLI", async () => {
+		const P = "pi-reload-pid-reused";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+		// The CLI's pid now names a live process started at another time.
+		editMirror(P, (m) => ({ ...m, abortedCliPid: process.pid }));
+
+		const startedAt = Date.now();
+		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		assert.equal(calls.at(-1).resume, `cc-${P}`, "a different start time means the aborted CLI is gone");
+		assert.ok(calls.at(-1).at - startedAt < 500, "nothing waits on the unrelated process");
+	});
+
+	it("rebuilds when another running pi process still owns the session", async () => {
+		const P = "pi-reload-owned";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([]), u3 = user("next");
+		const proc = await completeThenAbort(P, [u1, a1, u2], { cli: CLI_EXITS });
+		if (!exited(proc)) await once(proc, "exit");
+		reload();
+		editMirror(P, (m) => ({ ...m, pid: process.ppid }));
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "two processes never share one CC session file");
 	});
 });

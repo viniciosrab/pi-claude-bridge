@@ -128,6 +128,10 @@ export interface CliProcess {
 	exit: Promise<void>;
 	// The last STDERR_TAIL_CHARS of its stderr, for exit errors.
 	stderr: string;
+	// Its OS pid and start identity (cliStartTime), recorded on the mirror file so a
+	// reloaded module can still tell whether it may write.
+	pid?: number;
+	startTime?: string;
 }
 
 /** The fields an abort leaves on a session mirror for the next sync. */
@@ -224,6 +228,8 @@ export function trackCliProcess(
 	options.spawnClaudeCodeProcess = (spawnOptions) => {
 		const proc = launch(spawnOptions);
 		cli.spawned = true;
+		cli.pid = (proc as { pid?: number }).pid;
+		cli.startTime = cli.pid === undefined ? undefined : cliStartTime(cli.pid);
 		const done = () => { cli.exited = true; settle(); };
 		if (proc.exitCode !== null || proc.signalCode) done();
 		else {
@@ -282,7 +288,8 @@ function abortSettled(cli: CliProcess | undefined, abortedAt: number, now: numbe
 export function abortSettleWait(state: (AbortMark & { needsRebuild?: boolean }) | null, now = Date.now()): number {
 	const cli = state?.abortedProcess;
 	if (!state || state.abortedAt === undefined || state.needsRebuild || !cli?.spawned || cli.exited) return 0;
-	return Math.max(0, state.abortedAt + ABORT_SETTLE_MS - now);
+	// Clamped: a clock set back or a mark from the future never waits past the bound.
+	return Math.min(ABORT_SETTLE_MS, Math.max(0, state.abortedAt + ABORT_SETTLE_MS - now));
 }
 
 /** An empty assistant message ending a turn, as src/index.ts newAssistantOutput builds it. */
@@ -381,6 +388,14 @@ export interface MirrorRecord {
 	fingerprintLength: number;
 	// The process that wrote it: a CC session file never has two live writers.
 	pid: number;
+	// Set when the recorded turn was aborted: the abort mark, and the aborted CLI's
+	// pid and start identity when it was tracked. The cursor then covers the aborted
+	// prompt instead of a completed answer.
+	abortedAt?: number;
+	abortedPrompt?: string;
+	abortedFileOffset?: number;
+	abortedCliPid?: number;
+	abortedCliStartTime?: string;
 }
 
 const MIRROR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -439,23 +454,91 @@ function processAlive(pid: number): boolean {
 	}
 }
 
-/** The CC session a new process may resume for `piSessionId`, or null to rebuild:
- *  nothing recorded, another cwd, CC's file gone, another live process using it,
- *  or a history that no longer starts with the turn CC completed. */
-export function loadMirror(piSessionId: string, history: { role?: string; timestamp?: number }[], cwd: string): { sessionId: string; cursor: number } | null {
-	let record: MirrorRecord;
+/** A process's start time in clock ticks since boot (Linux /proc/<pid>/stat field 22),
+ *  so a pid the kernel has since handed to another process does not pass for the CLI
+ *  that had it. `undefined` where /proc is unavailable: liveness then rests on the pid
+ *  alone, and a reused pid at worst costs a rebuild, since every wait is bounded. */
+function cliStartTime(pid: number): string | undefined {
 	try {
-		record = JSON.parse(readFileSync(mirrorPath(piSessionId), "utf8")) as MirrorRecord;
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		// The fields after the command name, which is parenthesized and may hold spaces.
+		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		return fields[0] === "Z" ? "zombie" : fields[19];
+	} catch {
+		return undefined;
+	}
+}
+
+/** Whether the CLI recorded as `pid`, started at `startTime`, may still write. */
+function cliAlive(pid: number, startTime: string | undefined): boolean {
+	if (!processAlive(pid)) return false;
+	const now = startTime === undefined ? undefined : cliStartTime(pid);
+	return now === undefined || now === startTime;
+}
+
+// How often a reloaded module checks whether the aborted CLI has exited: it is not
+// this module's child, so no exit event reaches it.
+const CLI_POLL_MS = 25;
+
+/** The aborted CLI a mirror file records, as the next sync sees it. Its exit resolves
+ *  once the pid is gone or the settle bound passes, whichever comes first. Untracked
+ *  (no pid recorded): `undefined`, so the settle timer decides. */
+function recordedCli(record: MirrorRecord): CliProcess | undefined {
+	const pid = record.abortedCliPid;
+	if (pid === undefined) return undefined;
+	const alive = () => cliAlive(pid, record.abortedCliStartTime);
+	const deadline = Math.min((record.abortedAt ?? 0), Date.now()) + ABORT_SETTLE_MS;
+	const exit = new Promise<void>((resolve) => {
+		const poll = () => { if (!alive() || Date.now() >= deadline) resolve(); else setTimeout(poll, CLI_POLL_MS).unref(); };
+		poll();
+	});
+	return { spawned: true, get exited() { return !alive(); }, exit, stderr: "", pid, startTime: record.abortedCliStartTime };
+}
+
+/** The fields a mirror file keeps of an abort mark. */
+export function mirrorAbortFields(mark: AbortMark): Pick<MirrorRecord, "abortedAt" | "abortedPrompt" | "abortedFileOffset" | "abortedCliPid" | "abortedCliStartTime"> {
+	const cli = mark.abortedProcess?.spawned ? mark.abortedProcess : undefined;
+	return { abortedAt: mark.abortedAt, abortedPrompt: mark.abortedPrompt, abortedFileOffset: mark.abortedFileOffset, abortedCliPid: cli?.pid, abortedCliStartTime: cli?.startTime };
+}
+
+function recordedAbortMark(record: MirrorRecord): AbortMark | undefined {
+	if (record.abortedAt === undefined) return undefined;
+	return { abortedAt: record.abortedAt, abortedPrompt: record.abortedPrompt, abortedFileOffset: record.abortedFileOffset, abortedProcess: recordedCli(record) };
+}
+
+function readMirror(piSessionId: string): MirrorRecord | null {
+	try {
+		return JSON.parse(readFileSync(mirrorPath(piSessionId), "utf8")) as MirrorRecord;
 	} catch {
 		return null;
 	}
+}
+
+/** The abort mark a mirror file carries for a pi session this module has no mirror of
+ *  (after /reload, or in a new process), so the next prompt can wait for the aborted
+ *  CLI as it would have in the module that aborted it. Null when there is none, or
+ *  another live process owns the session. */
+export function persistedAbortMark(piSessionId: string | undefined): AbortMark | null {
+	const record = piSessionId ? readMirror(piSessionId) : null;
+	if (!record || (record.pid !== process.pid && processAlive(record.pid))) return null;
+	return recordedAbortMark(record) ?? null;
+}
+
+/** The CC session a new process may resume for `piSessionId`, or null to rebuild:
+ *  nothing recorded, another cwd, CC's file gone, another live process using it,
+ *  or a history that no longer starts with the turn CC completed. */
+export function loadMirror(piSessionId: string, history: { role?: string; timestamp?: number }[], cwd: string): { sessionId: string; cursor: number; abort?: AbortMark } | null {
+	const record = readMirror(piSessionId);
+	if (!record) return null;
 	if (record.cwd !== cwd || !existsSync(getSessionPath(record.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR))) return null;
 	if (record.pid !== process.pid && processAlive(record.pid)) return null;
 	// The cursor's messages unchanged, followed by the turn's final answer: a history
 	// branched inside that turn (say, /tree back to a tool result) dropped the answer
-	// CC's file still ends with.
+	// CC's file still ends with. An aborted turn's cursor covers its prompt instead,
+	// and postAbortSync judges what follows it, as it does without a reload.
+	const abort = recordedAbortMark(record);
 	if (record.fingerprintLength !== record.cursor || history.length <= record.cursor) return null;
-	if ((history[record.cursor] as { role?: string }).role !== "assistant") return null;
+	if (!abort && (history[record.cursor] as { role?: string }).role !== "assistant") return null;
 	if (historyFingerprint(history.slice(0, record.cursor)) !== record.fingerprint) return null;
-	return { sessionId: record.sessionId, cursor: record.cursor };
+	return { sessionId: record.sessionId, cursor: record.cursor, ...(abort ? { abort } : {}) };
 }
