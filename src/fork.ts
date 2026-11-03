@@ -7,15 +7,17 @@
 // edit upstream lines (shared imports, the Config interface, upstream tests or README),
 // add a hook line next to them instead.
 
-import type { query, SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, type query, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { getSessionPath } from "cc-session-io";
+import { getClaudeDir, getSessionPath } from "cc-session-io";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
+import { sessionCwdFor } from "./session-cwd.js";
+import { nonSystemMessages } from "./transcript.js";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
@@ -309,6 +311,27 @@ function failedTurn(model: Model<any>, stopReason: "aborted" | "error", errorMes
 
 type StreamFn = (model: Model<any>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 
+/** A stream that relays `streamFn`'s once `before` settles. Aborted meanwhile: the turn
+ *  ends as the provider ends an aborted one, without a query. */
+function streamAfter(before: () => Promise<void>, streamFn: StreamFn, model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
+	void (async () => {
+		await before();
+		if (options?.signal?.aborted) {
+			stream.push({ type: "error", reason: "aborted", error: failedTurn(model, "aborted", "Operation aborted") });
+			stream.end();
+			return;
+		}
+		try {
+			for await (const event of streamFn(model, context, options)) stream.push(event);
+		} catch (error) {
+			stream.push({ type: "error", reason: "error", error: failedTurn(model, "error", error instanceof Error ? error.message : String(error)) });
+		}
+		stream.end();
+	})();
+	return stream;
+}
+
 /** Hooked at the top of the provider's streamSimple, which is synchronous: while the
  *  session's aborted CLI is still shutting down, return a stream that relays `streamFn`'s
  *  once the CLI exits or the bound passes, so the sync inside it sees the settled file.
@@ -323,8 +346,9 @@ export function deferUntilAbortSettles(
 	if (options?.cacheRetention === "none" || options?.signal?.aborted) return undefined;
 	const waitMs = abortSettleWait(state);
 	if (!waitMs) return undefined;
-	const stream = createAssistantMessageEventStream();
-	void (async () => {
+	// Aborted while waiting: streamAfter ends the turn without a query, so the session
+	// keeps its abort mark and is not rotated off CC's file.
+	return streamAfter(async () => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let onAbort = () => {};
 		await Promise.race([
@@ -334,21 +358,7 @@ export function deferUntilAbortSettles(
 		]);
 		clearTimeout(timer);
 		options?.signal?.removeEventListener("abort", onAbort);
-		// Aborted while waiting: end the turn as the provider ends an aborted one, without
-		// a query, so the session keeps its abort mark and is not rotated off CC's file.
-		if (options?.signal?.aborted) {
-			stream.push({ type: "error", reason: "aborted", error: failedTurn(model, "aborted", "Operation aborted") });
-			stream.end();
-			return;
-		}
-		try {
-			for await (const event of streamFn(model, context, options)) stream.push(event);
-		} catch (error) {
-			stream.push({ type: "error", reason: "error", error: failedTurn(model, "error", error instanceof Error ? error.message : String(error)) });
-		}
-		stream.end();
-	})();
-	return stream;
+	}, streamFn, model, context, options);
 }
 
 /** How the sync after an abort proceeds. `undefined`: no abort mark, or a history
@@ -396,7 +406,46 @@ export interface MirrorRecord {
 	abortedFileOffset?: number;
 	abortedCliPid?: number;
 	abortedCliStartTime?: string;
+	// The completed turns of this CC session, oldest first, for a /fork of the pi
+	// session to start from (see forkPoint).
+	turns?: TurnBoundary[];
 }
+
+/** Where a completed turn left CC's session file: the history it covered, as the
+ *  record's cursor and fingerprint, and the file's size at its completion. */
+export interface TurnBoundary {
+	cursor: number;
+	fingerprint: string;
+	fileSize: number;
+	// sha256 of the file's first min(fileSize, HEAD_BYTES) bytes. CC only appends to its
+	// session file; a rewrite (a rebuild in place, same id) starts with new random
+	// uuids, so a changed head means the turn's offsets point into another file.
+	head: string;
+}
+
+const HEAD_BYTES = 64 * 1024;
+
+function headHash(head: Buffer, fileSize: number): string {
+	return createHash("sha256").update(head.subarray(0, Math.min(fileSize, HEAD_BYTES))).digest("hex");
+}
+
+/** A session file's size and first HEAD_BYTES bytes, or null when unreadable. */
+function readHead(sessionId: string, cwd: string): { size: number; head: Buffer } | null {
+	let fd: number | undefined;
+	try {
+		fd = openSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR), "r");
+		const buf = Buffer.alloc(HEAD_BYTES);
+		const head = buf.subarray(0, readSync(fd, buf, 0, HEAD_BYTES, 0));
+		return { size: fstatSync(fd).size, head };
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+// Enough for any fork point a user picks; older turns fall back to a rebuild.
+const MAX_TURN_BOUNDARIES = 200;
 
 const MIRROR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -435,7 +484,8 @@ export function saveMirror(piSessionId: string, record: Omit<MirrorRecord, "pid"
 		mkdirSync(mirrorDir(), { recursive: true });
 		pruneMirrors(now);
 		const file = mirrorPath(piSessionId);
-		writeFileSync(`${file}.tmp`, JSON.stringify({ ...record, pid: process.pid }));
+		const turns = turnBoundaries(readMirror(piSessionId), record);
+		writeFileSync(`${file}.tmp`, JSON.stringify({ ...record, pid: process.pid, ...(turns.length ? { turns } : {}) }));
 		renameSync(`${file}.tmp`, file);
 	} catch {}
 }
@@ -541,4 +591,183 @@ export function loadMirror(piSessionId: string, history: { role?: string; timest
 	if (!abort && (history[record.cursor] as { role?: string }).role !== "assistant") return null;
 	if (historyFingerprint(history.slice(0, record.cursor)) !== record.fingerprint) return null;
 	return { sessionId: record.sessionId, cursor: record.cursor, ...(abort ? { abort } : {}) };
+}
+
+// Fork from the parent's CC session. pi's /fork starts a new pi session holding a
+// prefix of its parent's history, with no CC session of its own, so the bridge rebuilt
+// one from pi's history, and the rebuilt file re-cached the whole conversation, as after
+// an abort. A CC fork of the parent's session reproduces the parent's request bytes and
+// reads them back (diag/probe-fork-cache.mjs). Each completed turn records where it left
+// CC's file; the forked session's first prompt forks that file at the turn its history
+// ends with, under its own CC session id, so nothing ever writes the parent's file.
+
+/** The mirror's turn list after a completed turn on `record`: the earlier turns of the
+ *  same CC session, then this one. An aborted turn adds none; a file that shrank or
+ *  whose head changed was rewritten, and none of its earlier turns hold. */
+function turnBoundaries(prior: MirrorRecord | null, record: Omit<MirrorRecord, "pid">): TurnBoundary[] {
+	const file = readHead(record.sessionId, record.cwd);
+	if (!file || file.size === 0) return [];
+	const earlier = prior?.sessionId === record.sessionId ? (prior.turns ?? []).filter((t) => t.cursor < record.cursor) : [];
+	const kept = earlier.every((t) => t.fileSize <= file.size && t.head === headHash(file.head, t.fileSize)) ? earlier : [];
+	const turn = record.abortedAt === undefined ? [{ cursor: record.cursor, fingerprint: record.fingerprint, fileSize: file.size, head: headHash(file.head, file.size) }] : [];
+	return [...kept, ...turn].slice(-MAX_TURN_BOUNDARIES);
+}
+
+// Child pi session id -> the pi session it was forked from, set at session_start and
+// taken by the child's first prompt. On globalThis, as session-cwd's map, because the
+// module instance that sees a session's start may not be the one serving its prompts.
+const FORK_PARENTS_KEY = Symbol.for("claude-bridge:forkParents");
+function forkParents(): Map<string, string> {
+	const g = globalThis as Record<symbol, Map<string, string> | undefined>;
+	return (g[FORK_PARENTS_KEY] ??= new Map());
+}
+
+/** The id in a pi session file's header line, its first. Reads only the file's head:
+ *  a session file holds the whole conversation. */
+function piSessionFileId(file: string): string | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(file, "r");
+		const buf = Buffer.alloc(64 * 1024);
+		const head = buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)).toString("utf8").split("\n", 1)[0];
+		const header = JSON.parse(head) as { type?: string; id?: unknown };
+		return header.type === "session" && typeof header.id === "string" ? header.id : undefined;
+	} catch {
+		return undefined;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+/** Hooked at pi's session_start: a session started by /fork remembers its parent, the
+ *  pi session in `previousSessionFile`. Any other start forgets it. */
+export function rememberForkParent(event: { reason: string; previousSessionFile?: string }, piSessionId: string): void {
+	forkParents().delete(piSessionId);
+	if (event.reason !== "fork" || !event.previousSessionFile) return;
+	const parent = piSessionFileId(event.previousSessionFile);
+	if (parent && parent !== piSessionId) forkParents().set(piSessionId, parent);
+}
+
+function lastText(content: unknown): string | undefined {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	return (content as { type?: string; text?: string }[]).filter((b) => b.type === "text").at(-1)?.text;
+}
+
+// The record types forkSession accepts as upToMessageId: its transcript holds only these
+// (sdk.mjs, 0.3.308); a uuid of any other type (custom-title, ...) is "not found". Not
+// progress, which the fork drops.
+const FORK_POINT_TYPES = new Set(["user", "assistant", "attachment", "system"]);
+
+/** The last chain entry CC had written when `turn` completed, when that turn ends with
+ *  pi's final `answer`: the file still starts with the bytes it had then, the records
+ *  up to its size parse, the last assistant record among them carries the answer's
+ *  text, and no user record follows it. `undefined` otherwise. */
+function turnEndEntry(sessionId: string, cwd: string, turn: TurnBoundary, answer: { content?: unknown }): string | undefined {
+	const want = lastText(answer.content);
+	if (!want) return undefined;
+	let text: string;
+	try {
+		const bytes = readFileSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR));
+		if (bytes.length < turn.fileSize || headHash(bytes, turn.fileSize) !== turn.head) return undefined;
+		text = bytes.subarray(0, turn.fileSize).toString("utf8");
+	} catch {
+		return undefined;
+	}
+	// The turn's records end at its last newline; a line CC was still writing is not one.
+	const lines = text.slice(0, text.lastIndexOf("\n") + 1).split("\n").filter(Boolean);
+	let last: string | undefined;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		let record: { type?: string; uuid?: unknown; message?: { content?: unknown } };
+		try { record = JSON.parse(lines[i]); } catch { return undefined; }
+		if (typeof record.uuid !== "string" || !FORK_POINT_TYPES.has(record.type ?? "")) continue;
+		last ??= record.uuid;
+		if (record.type === "user") return undefined;
+		if (record.type === "assistant") return lastText(record.message?.content) === want ? last : undefined;
+	}
+	return undefined;
+}
+
+/** Removes the file of fork `sessionId` from whichever project directory the SDK wrote
+ *  it to, when the bridge does not resolve it there: the fork is ours, made a moment ago
+ *  under a fresh id, and nothing resumes it. Never the parent's. */
+function removeForkFile(sessionId: string, parentSessionId: string): void {
+	if (sessionId === parentSessionId) return;
+	try {
+		const projects = join(getClaudeDir(process.env.CLAUDE_CONFIG_DIR), "projects");
+		for (const dir of readdirSync(projects)) rmSync(join(projects, dir, `${sessionId}.jsonl`), { force: true });
+	} catch {}
+}
+
+/** The SDK call startFromParentFork makes, replaceable by tests. */
+export const forkSeams = { forkSession };
+
+/** Where a forked pi session can start from its parent's CC session. */
+export interface ForkPoint {
+	// The parent's CC session, and its entry the fork keeps up to.
+	sessionId: string;
+	upToMessageId: string;
+	// History messages the fork covers, as syncSharedSession counts them.
+	cursor: number;
+}
+
+/** The fork point for a pi session forked from `parentPiSessionId` whose history
+ *  before its first prompt is `prior`, or null to rebuild: as loadMirror, nothing
+ *  recorded, another cwd, CC's file gone or another live process using it, plus an
+ *  aborted parent turn; and a `prior` that is not exactly the history some completed
+ *  turn of the parent covered followed by that turn's final answer. */
+export function forkPoint(parentPiSessionId: string, prior: { role?: string; timestamp?: number; content?: unknown }[], cwd: string): ForkPoint | null {
+	const record = readMirror(parentPiSessionId);
+	if (!record || record.cwd !== cwd || record.abortedAt !== undefined) return null;
+	if (record.pid !== process.pid && processAlive(record.pid)) return null;
+	const cursor = prior.length - 1;
+	const turn = record.turns?.find((t) => t.cursor === cursor);
+	if (!turn || prior[cursor].role !== "assistant") return null;
+	if (historyFingerprint(prior.slice(0, cursor)) !== turn.fingerprint) return null;
+	const upToMessageId = turnEndEntry(record.sessionId, cwd, turn, prior[cursor]);
+	return upToMessageId ? { sessionId: record.sessionId, upToMessageId, cursor } : null;
+}
+
+/** Hooked at the top of the provider's streamSimple: the first prompt of a pi session
+ *  /fork started, with no CC session yet, forks its parent's CC session at the forked
+ *  history's last turn (the SDK's forkSession, a copy under a new CC session id) and
+ *  `plant`s it as the session's, so the sync REUSEs it. `undefined`: no fork to make,
+ *  run now; a fork that fails also runs the prompt, which then rebuilds as before. */
+export function startFromParentFork(
+	streamFn: StreamFn,
+	state: object | null,
+	plant: (state: { sessionId: string; cursor: number; cwd: string }) => void,
+	log: (message: string) => void,
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream | undefined {
+	const child = options?.sessionId;
+	if (!child || state || options?.cacheRetention === "none") return undefined;
+	const parent = forkParents().get(child);
+	if (!parent) return undefined;
+	forkParents().delete(child);
+	if (options?.signal?.aborted || readMirror(child)) return undefined;
+	const cwd = sessionCwdFor(child);
+	const history = nonSystemMessages(context.messages);
+	let start = history.length;
+	while (start > 0 && history[start - 1].role === "user") start--;
+	const point = forkPoint(parent, history.slice(0, start), cwd);
+	if (!point) {
+		log(`fork: pi session ${child.slice(0, 8)} has no fork point in parent ${parent.slice(0, 8)}, rebuilding`);
+		return undefined;
+	}
+	return streamAfter(async () => {
+		try {
+			const { sessionId } = await forkSeams.forkSession(point.sessionId, { dir: cwd, upToMessageId: point.upToMessageId });
+			if (!existsSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR))) {
+				removeForkFile(sessionId, point.sessionId);
+				throw new Error(`forked session ${sessionId} not at its session path`);
+			}
+			plant({ sessionId, cursor: point.cursor, cwd });
+			log(`fork: pi session ${child.slice(0, 8)} starts from CC session ${sessionId.slice(0, 8)}, forked from ${point.sessionId.slice(0, 8)} at ${point.upToMessageId.slice(0, 8)}, cursor=${point.cursor}`);
+		} catch (error) {
+			log(`fork: forking CC session ${point.sessionId.slice(0, 8)} failed, rebuilding: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}, streamFn, model, context, options);
 }
