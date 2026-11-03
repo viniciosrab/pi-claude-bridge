@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createSession, openSession, repairToolPairing } from "cc-session-io";
+import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 
 const CWD = process.cwd();
 const MODEL = "claude-haiku-4-5";
@@ -677,5 +677,104 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 	} finally {
 		api.close();
 		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+// --- Resuming a session that ends at a tool result ---
+
+test("CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1 stops CC resuming a turn that ends at a tool result", { timeout: 120_000 }, async () => {
+	// A rebuild after a terminating tool, or after a parked query was discarded, ends
+	// at a tool result, which CC reads as an interrupted turn. Behind a server flag it
+	// then inserts a meta "Continue from where you left off." user message ahead of our
+	// prompt; CLAUDE_CODE_RESUME_INTERRUPTED_TURN forces that path here, so the control
+	// doesn't depend on the flag. src/index.ts CC_CHILD_ENV sets the bound. (PR #145)
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-resume-contract-"));
+	const resumePrompt = "Continue from where you left off.";
+	const sessionIds = [];
+	const run = async (extraEnv) => {
+		const session = createSession({ projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR, model: MODEL });
+		sessionIds.push(session.sessionId);
+		session.importMessages([
+			{ role: "user", content: "Compact now." },
+			{ role: "assistant", content: [{ type: "tool_use", id: "toolu_compact_1", name: "mcp__custom-tools__compact", input: {} }] },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_compact_1", content: "Compaction scheduled." }] },
+		]);
+		session.save();
+		await collect(query({
+			prompt: "PI-RESUME-NOTE",
+			options: providerOptions({
+				cwd, resume: session.sessionId, maxTurns: 1,
+				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", ...extraEnv },
+			}),
+		}));
+		const body = requests.filter((b) => JSON.stringify(b.messages).includes("PI-RESUME-NOTE")).at(-1);
+		assert.ok(body, "the resumed query never reached the stub API");
+		return JSON.stringify(body.messages);
+	};
+	try {
+		assert.ok((await run({})).includes(resumePrompt), "CC no longer inserts its resume prompt when forced; this guard may be obsolete");
+		assert.ok(!(await run({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "1" })).includes(resumePrompt), "CC still inserted its resume prompt with the bound set");
+	} finally {
+		api.close();
+		for (const id of sessionIds) deleteSession(id, cwd, process.env.CLAUDE_CONFIG_DIR);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("MAX_AGE_MS=1 keeps the fork's abort-resume shapes resumable and free of CC's resume prompt", { timeout: 180_000 }, async () => {
+	// fork: abort resume. After an Esc the bridge resumes CC's own file, which ends at
+	// the aborted turn: the prompt plus a partial answer, or a tool call left without a
+	// result. Those read to CC as interrupted turns too. With the bound set, pi's next
+	// prompt must reach the API with the earlier history intact and no
+	// "Continue from where you left off." inserted ahead of it.
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-abort-resume-contract-"));
+	const resumePrompt = "Continue from where you left off.";
+	const sessionIds = [];
+	const shapes = {
+		"aborted mid-answer": [
+			{ role: "user", content: "EARLIER-PROMPT" },
+			{ role: "assistant", content: [{ type: "text", text: "EARLIER-ANSWER" }] },
+			{ role: "user", content: "ABORTED-PROMPT" },
+			{ role: "assistant", content: [{ type: "text", text: "partial answer cut by Esc" }] },
+		],
+		"aborted mid-tool": [
+			{ role: "user", content: "EARLIER-PROMPT" },
+			{ role: "assistant", content: [{ type: "text", text: "EARLIER-ANSWER" }] },
+			{ role: "user", content: "ABORTED-PROMPT" },
+			{ role: "assistant", content: [{ type: "tool_use", id: "toolu_aborted_1", name: "mcp__custom-tools__read", input: { path: "a" } }] },
+		],
+	};
+	const run = async (messages, extraEnv) => {
+		const session = createSession({ projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR, model: MODEL });
+		sessionIds.push(session.sessionId);
+		session.importMessages(messages);
+		session.save();
+		await collect(query({
+			prompt: "PI-NEXT-PROMPT",
+			options: providerOptions({
+				cwd, resume: session.sessionId, maxTurns: 1,
+				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", ...extraEnv },
+			}),
+		}));
+		const body = requests.filter((b) => JSON.stringify(b.messages).includes("PI-NEXT-PROMPT")).at(-1);
+		assert.ok(body, "the resumed query never reached the stub API");
+		return JSON.stringify(body.messages);
+	};
+	try {
+		for (const [shape, messages] of Object.entries(shapes)) {
+			const bounded = await run(messages, { CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "1" });
+			assert.ok(!bounded.includes(resumePrompt), `${shape}: CC inserted its resume prompt with the bound set`);
+			for (const kept of ["EARLIER-PROMPT", "EARLIER-ANSWER", "ABORTED-PROMPT"]) {
+				assert.ok(bounded.includes(kept), `${shape}: the resumed request lost ${kept}`);
+			}
+		}
+	} finally {
+		api.close();
+		for (const id of sessionIds) deleteSession(id, cwd, process.env.CLAUDE_CONFIG_DIR);
+		rmSync(cwd, { recursive: true, force: true });
 	}
 });
