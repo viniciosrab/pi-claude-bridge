@@ -169,7 +169,7 @@ describe("non-streaming fallback delivered one block per assistant message", () 
 		try {
 			async function* gen() {
 				yield* [...deadStream, ...fallbackBlocks];
-				while (held.length === 0) await new Promise((r) => setTimeout(r, 10)); // the settle timer fired
+				await until(() => held.length > 0, "the settle timer to queue its callback");
 				yield failed;
 			}
 			await __test.consumeQuery(gen(), toolMap, fakeModel, () => false, c);
