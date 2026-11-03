@@ -9,6 +9,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionPath } from "cc-session-io";
+import { readFileSync, statSync } from "node:fs";
+import { ABORT_SETTLE_MS, trackCliProcess } from "../src/fork.js";
 
 const CWD = process.cwd();
 const MODEL = "claude-haiku-4-5";
@@ -35,6 +38,53 @@ async function resultOf(q) {
 	}
 	return result;
 }
+
+test("an aborted CLI exits on its own within the settle bound and writes nothing after its exit", { timeout: 180_000 }, async () => {
+	// The turn after an abort resumes CC's session file once the aborted CLI has
+	// exited (src/fork.ts postAbortSync), waiting at most ABORT_SETTLE_MS for it.
+	// Pin that the CLI goes on stdin EOF well inside that bound rather than at the
+	// SDK's SIGTERM (~2 s) or SIGKILL (~7 s), through the spawner the bridge
+	// installs, and that the exit is the last write: the file is final by then.
+	const prompt = "Count from 1 to 2000, numbers separated by single spaces, nothing else.";
+	const options = providerOptions({ includePartialMessages: true });
+	const turn = { prompt, resumedId: null, fileOffset: 0 };
+	trackCliProcess(options, turn);
+	const q = query({ prompt, options });
+	let sessionId, abortedAt, aborted = false;
+	for await (const message of q) {
+		if (message.type === "system" && message.subtype === "init") sessionId = message.session_id;
+		if (aborted) break; // consumeQuery: stop at the next message after an abort
+		if (message.type === "stream_event" && message.event.type === "content_block_delta") {
+			// src/index.ts requestAbort: interrupt, then close.
+			aborted = true;
+			abortedAt = performance.now();
+			void q.interrupt().catch(() => {});
+			try { q.close(); } catch {}
+		}
+	}
+	const iteratorMs = performance.now() - abortedAt;
+	assert.ok(aborted, "the turn streamed no text to abort on");
+	assert.ok(turn.process?.spawned, "the SDK did not launch the CLI through the tracked spawner");
+	let bound;
+	await Promise.race([turn.process.exit, new Promise((resolve) => { bound = setTimeout(resolve, ABORT_SETTLE_MS); })]);
+	clearTimeout(bound);
+	const exitMs = performance.now() - abortedAt;
+	assert.ok(turn.process.exited, `the aborted CLI was still alive ${ABORT_SETTLE_MS}ms after the abort`);
+
+	const file = getSessionPath(sessionId, CWD, process.env.CLAUDE_CONFIG_DIR);
+	const atExit = statSync(file);
+	await new Promise((resolve) => setTimeout(resolve, 2_000));
+	const later = statSync(file);
+	console.log(`aborted CLI: exit observed +${Math.round(exitMs)}ms, SDK iterator ended +${Math.round(iteratorMs)}ms; session file ${atExit.size} bytes at exit, ${later.size} 2s later`);
+	assert.ok(exitMs < 1_500, `the CLI took ${Math.round(exitMs)}ms to exit: it no longer goes on stdin EOF before the SDK's SIGTERM`);
+	assert.equal(later.size, atExit.size, "the session file grew after the CLI exited");
+	assert.equal(later.mtimeMs, atExit.mtimeMs, "the session file was written after the CLI exited");
+	assert.ok(readFileSync(file, "utf8").includes(JSON.stringify(prompt).slice(1, -1)), "the aborted prompt is not on file");
+
+	const resumed = await resultOf(query({ prompt: "Reply OK.", options: providerOptions({ resume: sessionId }) }));
+	assert.equal(resumed?.subtype, "success", `resuming the aborted session failed: ${JSON.stringify(resumed)}`);
+	assert.equal(resumed.session_id, sessionId);
+});
 
 test("a resumed result's duration_api_ms is the session's running total, its duration_ms this turn's", { timeout: 180_000 }, async () => {
 	// The fork's debug timing line subtracts the total it last saw for the CC

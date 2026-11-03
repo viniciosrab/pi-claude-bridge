@@ -8,7 +8,7 @@ import "./fork-tool-streaming.js"; // fork: eager tool input streaming
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
-import { abortedTurnAtStart, abortMark, dropMirror, historyFingerprint, loadMirror, postAbortSync, saveMirror, withProviderSettingSources, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
+import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, historyFingerprint, loadMirror, postAbortSync, saveMirror, trackCliProcess, withProviderSettingSources, withStderrTail, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
@@ -211,7 +211,7 @@ interface SessionState {
 	// with no query in flight does NOT set this — there's no concurrent CC writer
 	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
-	abortedAt?: AbortMark["abortedAt"]; abortedPrompt?: AbortMark["abortedPrompt"]; abortedFileOffset?: AbortMark["abortedFileOffset"]; // fork: abort resume
+	abortedAt?: AbortMark["abortedAt"]; abortedPrompt?: AbortMark["abortedPrompt"]; abortedFileOffset?: AbortMark["abortedFileOffset"]; abortedProcess?: AbortMark["abortedProcess"]; // fork: abort resume
 }
 
 /**
@@ -1766,7 +1766,7 @@ function markAbortedSession(c: QueryContext, prior: SessionState | null, capture
 
 /** fork: abort resume. REUSE across an aborted turn, clearing the abort mark. */
 function resumeAfterAbort(piSessionId: string | null, state: SessionState, cursor: number, cwd: string): SyncResult {
-	setSessionStateFor(piSessionId, { ...state, cursor, cwd, abortedAt: undefined, abortedPrompt: undefined, abortedFileOffset: undefined, forceRotate: undefined });
+	setSessionStateFor(piSessionId, { ...state, cursor, cwd, abortedAt: undefined, abortedPrompt: undefined, abortedFileOffset: undefined, abortedProcess: undefined, forceRotate: undefined });
 	debug(`Case 3 post-abort: resuming session ${state.sessionId.slice(0, 8)} across the aborted turn, cursor=${cursor}`);
 	debug(`syncResult: path=reuse sessionId=${state.sessionId} cursor=${cursor} post-abort`);
 	return { sessionId: state.sessionId };
@@ -1845,6 +1845,7 @@ function discardRewrittenQuery(c: QueryContext): void {
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	const afterAbort = deferUntilAbortSettles(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), model, context, options); if (afterAbort) return afterAbort; // fork: abort resume
 	showStartupNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
@@ -2145,6 +2146,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 		...makeCliDebugOptions("provider"),
 	};
+	trackCliProcess(queryOptions, abortedTurn); // fork: abort resume
 
 	debug("provider: fresh query",
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
@@ -2280,6 +2282,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				// The SDK drops its copy of the result text if any message follows the error
 				// result, so prefer the cause consumeQuery recorded off the result itself.
 				queryCtx.turnOutput.errorMessage ??= error instanceof Error ? error.message : String(error);
+				queryCtx.turnOutput.errorMessage = withStderrTail(queryCtx.turnOutput.errorMessage, abortedTurn.process); // fork: abort resume
 			}
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
 				queryCtx.releasePendingToolCalls("Query ended");

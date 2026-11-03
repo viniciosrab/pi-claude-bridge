@@ -7,12 +7,15 @@
 // edit upstream lines (shared imports, the Config interface, upstream tests or README),
 // add a hook line next to them instead.
 
-import type { query } from "@anthropic-ai/claude-agent-sdk";
+import type { query, SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { getSessionPath } from "cc-session-io";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
@@ -105,12 +108,27 @@ applyForkChildEnv();
 // every abort, and a rebuilt file lacks the context blocks CC writes at the head of its own
 // sessions, so the next request re-caches the whole conversation (diag/AUDIT.md, "since CC
 // 2.1.263"). Native Claude Code resumes its own file after Esc, Ctrl-C or SIGTERM and reads
-// the cache back; past a settle window, the bridge does the same.
+// the cache back; once the aborted CLI has exited, the bridge does the same.
 
-/** How long after an abort its killed CLI may still write to the session file. The SDK
- *  closes stdin and force-kills about 2 s later; a sync inside this window rebuilds on a
- *  rotated id, as upstream does after every abort, rather than share the file. */
+/** How long after an abort the next prompt waits for the aborted CLI to exit. The SDK
+ *  closes stdin, sends SIGTERM about 2 s later and SIGKILL about 5 s after that; a CLI
+ *  still alive past this bound may still write, so the next sync rebuilds on a rotated id,
+ *  as upstream does after every abort, rather than share the file. When the exit cannot
+ *  be observed (no process was tracked), nothing waits: a sync less than this long after
+ *  the abort rebuilds, and one later resumes. */
 export const ABORT_SETTLE_MS = 3_000;
+
+/** The aborted query's CLI process, as the next sync sees it. */
+export interface CliProcess {
+	// False when no process was launched through the tracked spawner: its exit
+	// cannot be observed, so the settle timer decides instead.
+	spawned: boolean;
+	exited: boolean;
+	// Resolves when the process exits, or at once when none was spawned.
+	exit: Promise<void>;
+	// The last STDERR_TAIL_CHARS of its stderr, for exit errors.
+	stderr: string;
+}
 
 /** The fields an abort leaves on a session mirror for the next sync. */
 export interface AbortMark {
@@ -120,6 +138,7 @@ export interface AbortMark {
 	// killed before writing it leaves a file that lacks the prompt.
 	abortedPrompt?: string;
 	abortedFileOffset?: number;
+	abortedProcess?: CliProcess;
 }
 
 /** What a query records at its start, for the abort mark should it be aborted. */
@@ -127,6 +146,95 @@ export interface AbortedTurn {
 	prompt: string;
 	resumedId: string | null;
 	fileOffset: number;
+	process?: CliProcess;
+}
+
+// The SDK's own spawn keeps this much stderr for its exit errors.
+const STDERR_TAIL_CHARS = 2_048;
+// How long the SDK's own spawn holds an exit back for stderr to drain.
+const STDERR_DRAIN_MS = 200;
+const EXIT_AFTER_STDERR = "fork-exit-after-stderr-drained";
+
+/** Launches the CLI as the SDK's own local spawn does: stderr goes to `onStderr`, and
+ *  'exit' reaches listeners once stderr has drained (bounded), so an exit error built
+ *  on it sees the whole tail. The SDK adds that tail itself only for its own spawn;
+ *  withStderrTail puts it back. */
+function spawnCli(options: SpawnOptions, onStderr: (data: string) => void): SpawnedProcess & { pid?: number; stderr: Readable } {
+	const child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env, signal: options.signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+	child.stderr.setEncoding("utf8");
+	child.stderr.on("data", onStderr);
+	child.stderr.on("error", () => {});
+	child.on("error", () => {});
+	let stderrClosed = false, exited = false, delivered = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deliver = () => {
+		if (delivered) return;
+		delivered = true;
+		clearTimeout(timer);
+		child.emit(EXIT_AFTER_STDERR, child.exitCode, child.signalCode);
+	};
+	child.stderr.once("close", () => { stderrClosed = true; if (exited) deliver(); });
+	child.once("exit", () => { exited = true; if (stderrClosed) deliver(); else timer = setTimeout(deliver, STDERR_DRAIN_MS); });
+	const event = (name: string) => (name === "exit" ? EXIT_AFTER_STDERR : name);
+	return {
+		stdin: child.stdin,
+		stdout: child.stdout,
+		stderr: child.stderr,
+		get pid() { return child.pid; },
+		get killed() { return child.killed; },
+		get exitCode() { return child.exitCode; },
+		get signalCode() { return child.signalCode; },
+		kill: (signal: NodeJS.Signals) => child.kill(signal),
+		on: (name: string, listener: (...args: any[]) => void) => { child.on(event(name), listener); },
+		once: (name: string, listener: (...args: any[]) => void) => { child.once(event(name), listener); },
+		off: (name: string, listener: (...args: any[]) => void) => { child.off(event(name), listener); },
+	};
+}
+
+// Secrets a stderr tail may carry, masked before it reaches pi's error message.
+const STDERR_SECRETS: [RegExp, string][] = [
+	[/sk-ant-[A-Za-z0-9_-]+/g, "[REDACTED]"],
+	[/Bearer\s+\S+/gi, "Bearer [REDACTED]"],
+	[/\b(token|secret|password|api[_-]?key)(\s*[=:]\s*)\S+/gi, "$1$2[REDACTED]"],
+];
+
+/** The SDK's exit error ("Claude Code process exited with code 1") with the CLI's
+ *  redacted stderr tail, as the SDK's own spawn reports it: auth failures that end the
+ *  CLI before any result only say so on stderr. Other messages pass through. */
+export function withStderrTail(message: string | undefined, cli: CliProcess | undefined): string | undefined {
+	if (!message || !cli?.stderr || !/^Claude Code process (exited|terminated)/.test(message) || message.includes(". stderr: ")) return message;
+	const tail = STDERR_SECRETS.reduce((text, [pattern, mask]) => text.replace(pattern, mask), cli.stderr).slice(-STDERR_TAIL_CHARS).trim();
+	return tail ? `${message}. stderr: ${tail}` : message;
+}
+
+/** Launch the query's CLI through a spawner that records its exit on `turn`, so the sync
+ *  after an abort can tell a CLI that may still write from one that is gone. Wraps a
+ *  spawner already set rather than replace it. */
+export function trackCliProcess(
+	options: { spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess; stderr?: (data: string) => void },
+	turn: AbortedTurn,
+): void {
+	let settle!: () => void;
+	const cli: CliProcess = { spawned: false, exited: false, exit: new Promise((resolve) => { settle = resolve; }), stderr: "" };
+	const onStderr = (data: string) => {
+		cli.stderr = (cli.stderr + data).slice(-2 * STDERR_TAIL_CHARS);
+		options.stderr?.(data);
+	};
+	const launch = options.spawnClaudeCodeProcess ?? ((o: SpawnOptions) => spawnCli(o, onStderr));
+	options.spawnClaudeCodeProcess = (spawnOptions) => {
+		const proc = launch(spawnOptions);
+		cli.spawned = true;
+		const done = () => { cli.exited = true; settle(); };
+		if (proc.exitCode !== null || proc.signalCode) done();
+		else {
+			proc.once("exit", done);
+			// A failed spawn leaves no process behind to write. Other errors, such as the
+			// AbortError of the force-kill signal, come while the process may still live.
+			proc.once("error", () => { if ((proc as { pid?: number }).pid === undefined) done(); });
+		}
+		return proc;
+	};
+	turn.process = cli;
 }
 
 function sessionFileSize(sessionId: string, cwd: string): number {
@@ -146,8 +254,8 @@ export function abortedTurnAtStart(promptBlocks: { type: string }[] | null, prom
 
 /** The mark for an aborted query on session `sessionId`. A file the query did not
  *  resume started empty. */
-export function abortMark(turn: AbortedTurn, sessionId: string, now = Date.now()): Required<AbortMark> {
-	return { abortedAt: now, abortedPrompt: turn.prompt, abortedFileOffset: sessionId === turn.resumedId ? turn.fileOffset : 0 };
+export function abortMark(turn: AbortedTurn, sessionId: string, now = Date.now()): AbortMark & Required<Omit<AbortMark, "abortedProcess">> {
+	return { abortedAt: now, abortedPrompt: turn.prompt, abortedFileOffset: sessionId === turn.resumedId ? turn.fileOffset : 0, abortedProcess: turn.process };
 }
 
 /** Whether CC wrote the aborted prompt to its session file past the recorded offset.
@@ -162,11 +270,86 @@ function abortedPromptPersisted(sessionId: string, mark: AbortMark, cwd: string)
 	}
 }
 
+/** Whether the aborted CLI can no longer write its session file: it exited, or, when
+ *  its exit cannot be observed, the settle window has passed. */
+function abortSettled(cli: CliProcess | undefined, abortedAt: number, now: number): boolean {
+	return cli?.spawned ? cli.exited : now - abortedAt >= ABORT_SETTLE_MS;
+}
+
+/** How long the next prompt should wait for the aborted CLI to exit: the rest of the
+ *  bound while a tracked CLI is alive, else 0 (gone, untracked, or a rebuild that does
+ *  not touch its file anyway). */
+export function abortSettleWait(state: (AbortMark & { needsRebuild?: boolean }) | null, now = Date.now()): number {
+	const cli = state?.abortedProcess;
+	if (!state || state.abortedAt === undefined || state.needsRebuild || !cli?.spawned || cli.exited) return 0;
+	return Math.max(0, state.abortedAt + ABORT_SETTLE_MS - now);
+}
+
+/** An empty assistant message ending a turn, as src/index.ts newAssistantOutput builds it. */
+function failedTurn(model: Model<any>, stopReason: "aborted" | "error", errorMessage: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason,
+		errorMessage,
+		timestamp: Date.now(),
+	};
+}
+
+type StreamFn = (model: Model<any>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+
+/** Hooked at the top of the provider's streamSimple, which is synchronous: while the
+ *  session's aborted CLI is still shutting down, return a stream that relays `streamFn`'s
+ *  once the CLI exits or the bound passes, so the sync inside it sees the settled file.
+ *  `undefined`: nothing to wait for, run now. */
+export function deferUntilAbortSettles(
+	streamFn: StreamFn,
+	state: (AbortMark & { needsRebuild?: boolean }) | null,
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream | undefined {
+	if (options?.cacheRetention === "none" || options?.signal?.aborted) return undefined;
+	const waitMs = abortSettleWait(state);
+	if (!waitMs) return undefined;
+	const stream = createAssistantMessageEventStream();
+	void (async () => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let onAbort = () => {};
+		await Promise.race([
+			state!.abortedProcess!.exit,
+			new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); }),
+			new Promise<void>((resolve) => { onAbort = () => resolve(); options?.signal?.addEventListener("abort", onAbort, { once: true }); }),
+		]);
+		clearTimeout(timer);
+		options?.signal?.removeEventListener("abort", onAbort);
+		// Aborted while waiting: end the turn as the provider ends an aborted one, without
+		// a query, so the session keeps its abort mark and is not rotated off CC's file.
+		if (options?.signal?.aborted) {
+			stream.push({ type: "error", reason: "aborted", error: failedTurn(model, "aborted", "Operation aborted") });
+			stream.end();
+			return;
+		}
+		try {
+			for await (const event of streamFn(model, context, options)) stream.push(event);
+		} catch (error) {
+			stream.push({ type: "error", reason: "error", error: failedTurn(model, "error", error instanceof Error ? error.message : String(error)) });
+		}
+		stream.end();
+	})();
+	return stream;
+}
+
 /** How the sync after an abort proceeds. `undefined`: no abort mark, or a history
- *  rewrite already forces a rebuild. `"resume"`: the settle window has passed, CC wrote
- *  the aborted prompt, and every message pi has past the cursor belongs to the aborted
- *  turn (its partial answer, tool calls and their results). `"rebuild"`: anything else,
- *  including a user message CC never saw. */
+ *  rewrite already forces a rebuild. `"resume"`: the aborted CLI has exited (or, when
+ *  its exit cannot be observed, the settle window has passed), CC wrote the aborted
+ *  prompt, and every message pi has past the cursor belongs to the aborted turn (its
+ *  partial answer, tool calls and their results). `"rebuild"`: anything else, including
+ *  a user message CC never saw and a CLI still alive past the bound. */
 export function postAbortSync(
 	state: (AbortMark & { sessionId: string; cursor: number; needsRebuild?: boolean }) | null,
 	priorMessages: { role?: string }[],
@@ -174,7 +357,7 @@ export function postAbortSync(
 	now = Date.now(),
 ): "resume" | "rebuild" | undefined {
 	if (!state || state.abortedAt === undefined || state.needsRebuild) return undefined;
-	const resumable = now - state.abortedAt >= ABORT_SETTLE_MS
+	const resumable = abortSettled(state.abortedProcess, state.abortedAt, now)
 		&& priorMessages.length >= state.cursor
 		&& priorMessages.slice(state.cursor).every((m) => m.role !== "user")
 		&& abortedPromptPersisted(state.sessionId, state, cwd);
