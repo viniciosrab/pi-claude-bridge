@@ -103,3 +103,13 @@ describe("provider query env", () => {
 		assert.equal(options.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH, "1000000");
 	});
 });
+
+describe("provider query settings", () => {
+	// Settings precedence is user < project < local < flag, and `settings` is the
+	// flag layer: a user's Claude Code output style is persona text written for
+	// standalone Claude Code, and pi owns the persona on the provider path (#220).
+	it("pins Claude Code's default output style over a user-level one", async () => {
+		const options = await capturedOptions({ provider: {} });
+		assert.equal(options.settings.outputStyle, "default");
+	});
+});

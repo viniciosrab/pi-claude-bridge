@@ -7,6 +7,7 @@ import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-st
 import "./fork-tool-streaming.js"; // fork: eager tool input streaming
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, historyFingerprint, loadMirror, mirrorAbortFields, persistedAbortMark, postAbortSync, saveMirror, trackCliProcess, withProviderSettingSources, withStderrTail, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
 import { dirname, join } from "path";
@@ -18,7 +19,7 @@ import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx } from "./query-state.js";
+import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown, type Config } from "./config.js";
 import {
@@ -87,7 +88,8 @@ function debug(...args: unknown[]) {
 		return JSON.stringify(a);
 	};
 	const msg = args.map(fmt).join(" ");
-	appendFileSync(logPath, `[${ts}] [${moduleInstanceId}] ${msg}\n`);
+	// A debug line is never worth failing the caller over (a read-only or full disk).
+	try { appendFileSync(logPath, `[${ts}] [${moduleInstanceId}] ${msg}\n`); } catch { /* ignore */ }
 }
 
 // Per-query CLI debug capture. When CLAUDE_BRIDGE_DEBUG=1, ask the Claude Code
@@ -122,8 +124,15 @@ function diagDump(label: string, data: Record<string, unknown>) {
 	const ts = new Date().toISOString();
 	const entry = { ts, moduleInstanceId, label, ...data };
 	const logPath = diagLogPath();
-	mkdirSync(dirname(logPath), { recursive: true });
-	appendFileSync(logPath, JSON.stringify(entry) + "\n");
+	// Diagnostics must never take down what they describe: a caller may be a timer
+	// (the lost tool call watchdog) where a throw escapes uncaught and skips teardown.
+	try {
+		mkdirSync(dirname(logPath), { recursive: true });
+		appendFileSync(logPath, JSON.stringify(entry) + "\n");
+	} catch (error) {
+		debug(`DIAG: ${label} could not be written to ${logPath}:`, error);
+		return;
+	}
 	debug(`DIAG: ${label} (see ${logPath})`);
 }
 
@@ -921,6 +930,7 @@ export const __test = {
 	finalizeCurrentStream,
 	resultErrorText,
 	deliverToolResults,
+	toMcpToolDefs,
 	drainForAbort,
 	CC_CHILD_ENV,
 	buildMcpServers,
@@ -1084,6 +1094,26 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 	return { mcpTools, customToolNameToSdk, customToolNameToPi };
 }
 
+// A handler waits for the result of a tool call Claude Code dispatched, and results
+// come only from pi running the calls it was handed. When a call reaches Claude Code
+// but never pi (for example a parallel call dropped after a non-streaming fallback),
+// nothing can ever answer it: the handler waits forever and the turn sits on
+// "Working" until a person aborts it. Whether pi has the call is checked after the
+// timeout, not on arrival, because a handler can legitimately run ahead of the stream
+// event that tells the bridge about its call. A call pi did receive is never failed:
+// its tool may run for an hour.
+function watchForLostToolCall(c: QueryContext, toolCallId: string, pending: PendingToolCall, parkedAt = Date.now()): void {
+	pending.watchdog = setTimeout(() => {
+		if (c.pendingToolCalls.get(toolCallId) !== pending) return; // answered, released or replaced
+		if (c.knowsToolCall(toolCallId)) {
+			watchForLostToolCall(c, toolCallId, pending, parkedAt);
+			return;
+		}
+		failLostToolCall(c, toolCallId, pending.toolName, Date.now() - parkedAt);
+	}, c.lostCallTimeoutMs);
+	pending.watchdog.unref?.();
+}
+
 // Creates an MCP server that bridges pi tools to the SDK. Each tool handler
 // blocks on a Promise until pi delivers the tool result via streamSimple.
 // Handlers receive their toolCallId from Claude's tools/call _meta, so results
@@ -1094,9 +1124,8 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 // it, and a handler that runs first parks its resolver in `pendingToolCalls`.
 // Handlers close over the captured `queryCtx`, ensuring they operate on the
 // correct query's state while multiple queries run concurrently.
-function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
-	if (!tools.length) return undefined;
-	const mcpTools = tools.map((tool) => ({
+function toMcpToolDefs(tools: Tool[], queryCtx: QueryContext) {
+	return tools.map((tool) => ({
 		name: tool.name,
 		description: tool.description,
 		inputSchema: tool.parameters,
@@ -1109,11 +1138,23 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 			}
 			debug(`mcp handler: ${tool.name} [${toolCallId}] → waiting`);
 			return new Promise<McpResult>((resolve) => {
-				queryCtx.pendingToolCalls.set(toolCallId, { toolName: tool.name, resolve });
+				const pending: PendingToolCall = {
+					toolName: tool.name,
+					resolve: (result) => {
+						clearTimeout(pending.watchdog);
+						resolve(result);
+					},
+				};
+				watchForLostToolCall(queryCtx, toolCallId, pending);
+				queryCtx.pendingToolCalls.set(toolCallId, pending);
 			});
 		},
 	}));
-	return { [MCP_SERVER_NAME]: createToolServer(MCP_SERVER_NAME, mcpTools) };
+}
+
+function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
+	if (!tools.length) return undefined;
+	return { [MCP_SERVER_NAME]: createToolServer(MCP_SERVER_NAME, toMcpToolDefs(tools, queryCtx)) };
 }
 
 // --- Usage helpers ---
@@ -1362,6 +1403,7 @@ function processStreamEvent(
 function endTurnOnToolUse(c: QueryContext): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	c.clearToolUseSettle();
+	for (const block of c.turnOutput.content) if (block.type === "toolCall") c.deliveredToolCallIds.add(block.id);
 	c.turnOutput.stopReason = "toolUse";
 	const stream = c.currentPiStream;
 	stream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
@@ -1559,10 +1601,9 @@ async function consumeQuery(
 	model: Model<any>,
 	wasAborted: () => boolean,
 	queryCtx: QueryContext,
-): Promise<{ capturedSessionId?: string }> {
+): Promise<{ capturedSessionId?: string; failure?: Error }> {
 	let capturedSessionId: string | undefined;
-	/** An error result ended the turn (upstream's #172 `failure`, which the fork lacks). */
-	let failure = false;
+	let failure: Error | undefined;
 
 	for await (const message of sdkQuery) {
 		// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery
@@ -1574,9 +1615,11 @@ async function consumeQuery(
 		if (wasAborted()) break;
 		await reportHeldRateLimit(queryCtx, model);
 		// Everything below the currentPiStream guard is content, which there is
-		// nowhere to put once a turn has ended on a tool call. These three are not
-		// content and must not share that gate:
+		// nowhere to put once a turn has ended on a tool call. Handle lifecycle
+		// messages before that gate:
 		//
+		// - replay acknowledgements: clear a queued steer even after its pi turn
+		//   stream has ended.
 		// - stdin: nothing else closes the CLI's stdin now that the prompt is a
 		//   streamed generator (isSingleUserTurn=false), so missing this hangs the query.
 		// - the failure a `result` carries: it is the only record that the turn
@@ -1585,11 +1628,18 @@ async function consumeQuery(
 		//   open; once ended, turnOutput is the message pi already recorded.
 		// - rate-limit events: notifications to the user, which are most likely to
 		//   fire during exactly the long tool-using turns the guard was skipping.
+		if (message.type === "user" && message.parent_tool_use_id === null && "isReplay" in message && message.isReplay === true) {
+			// For fresh steer UUIDs, replay marks incorporation into the turn, not
+			// completion. Its MCP calls still need stdin until the following result.
+			queryCtx.pendingSteerUuids.delete(message.uuid);
+		}
 		let resultError: string | undefined;
 		if (message.type === "result") {
-			queryCtx.promptStream?.end();
 			logServedContextWindow("result", message, model);
 			resultError = resultErrorText(message);
+			// A result ends a turn, not necessarily the query: steers not yet replayed
+			// can still start a later turn.
+			if (resultError !== undefined || queryCtx.pendingSteerUuids.size === 0) queryCtx.promptStream?.end();
 			if (resultError !== undefined) {
 				// Consume the rejection alongside the failure it caused, so a later
 				// unrelated failure on this query doesn't inherit the label.
@@ -1598,11 +1648,15 @@ async function consumeQuery(
 					queryCtx.rateLimitRejection = null;
 				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
-				failure = true;
 				if (queryCtx.turnOutput && queryCtx.currentPiStream) {
 					queryCtx.turnOutput.stopReason = "error";
 					queryCtx.turnOutput.errorMessage = resultError;
 				}
+				// The failure ends the query. Closing stdin does not: Claude Code still
+				// runs a steer it had queued, and that turn's stop reason would overwrite
+				// this one. The caller tears the query down as a failed one.
+				failure = new Error(resultError);
+				break;
 			}
 		}
 		if (message.type === "rate_limit_event") {
@@ -1642,9 +1696,7 @@ async function consumeQuery(
 		if (!queryCtx.currentPiStream || !queryCtx.turnOutput) continue;
 
 		// A fallback's blocks come back to back, so any of these means the SDK is past them.
-		// fork: an error result still reaches here (the fork has no #172 break); it fails the turn, so only drop the wait.
-		if (failure) queryCtx.clearToolUseSettle();
-		else if (message.type === "stream_event" || message.type === "user" || message.type === "result") flushFallbackToolUse(queryCtx);
+		if (message.type === "stream_event" || message.type === "user" || message.type === "result") flushFallbackToolUse(queryCtx);
 
 		switch (message.type) {
 			case "stream_event":
@@ -1674,12 +1726,9 @@ async function consumeQuery(
 				}
 				break;
 			case "user":
-				// SDK echo of the user prompt — no stream events to emit. Note it
-				// carries only prompts and tool results: a steer CC drained at a
-				// tool boundary is recorded in its session transcript as a
-				// `queued_command` attachment and never reaches this stream, which
-				// is why the mid-turn steering tripwire has to live in the
-				// integration test.
+				// Prompt/tool-result echoes have no content events to emit. With
+				// replay-user-messages, queued steers also arrive as user replays;
+				// their lifecycle acknowledgement is handled above the stream guard.
 				break;
 			default:
 				debug("consumeQuery: unhandled SDK message type", message.type);
@@ -1697,7 +1746,7 @@ async function consumeQuery(
 	// DEBUG: trace when consumeQuery exits
 	debug(`consumeQuery: for-await loop exited, wasAborted=${wasAborted()}, capturedSessionId=${capturedSessionId?.slice(0, 8) ?? "none"}`);
 
-	return { capturedSessionId };
+	return { capturedSessionId, failure };
 }
 
 /** The trailing user turn as content blocks, or null if there isn't one.
@@ -1744,14 +1793,18 @@ async function deliverToolResults(
 			debug(`WARNING: steer with no prompt stream, dropping: ${text.slice(0, 60)}`);
 			steerMissedSession(c, text);
 		} else {
+			const uuid = randomUUID();
+			// Register before awaiting stdin: a result can arrive during the write.
+			c.pendingSteerUuids.add(uuid);
 			try {
-				await c.promptStream.push(userMessage(steer, "next"));
+				await c.promptStream.push({ ...userMessage(steer, "next"), uuid });
 				debug(`provider: steer written to CC stdin before tool result: ${text.slice(0, 60)}`);
 			} catch (error) {
 				// The query is ending — pushing further input would wedge tool-result
 				// delivery, so the steer doesn't reach this query. It is still in
 				// pi's context, and the caller has already advanced the session
 				// cursor past it, so force a rebuild or CC would never see it.
+				c.pendingSteerUuids.delete(uuid);
 				debug(`provider: steer push rejected, delivering tool result anyway:`, error);
 				steerMissedSession(c, text);
 			}
@@ -1895,6 +1948,15 @@ const CONTINUE_AFTER_RESUME_PROMPT =
  *  history — so the turn continues instead of ending here. Nothing is lost by
  *  killing the subprocess: pi owns the only copy of the conversation that counts. */
 function discardRewrittenQuery(c: QueryContext): void {
+	discardQuery(c, "Context was compacted; this query was discarded.");
+	if (c.piSessionId) historyRewrittenBySession.delete(c.piSessionId);
+	debug("provider: history rewritten under a parked query — discarded it, rebuilding from current history");
+}
+
+/** Kill a query whose conversation can no longer be continued in place, settling its
+ *  parked handlers with `reason`. What follows rebuilds from pi's history, so the
+ *  session's mirror is marked for it. */
+function discardQuery(c: QueryContext, reason: string): void {
 	const discarded = c.activeQuery as { interrupt?: () => Promise<unknown>; close?: () => void } | null;
 	if (discarded) abandonedQueries.add(discarded);
 	c.activeQuery = null;
@@ -1902,11 +1964,11 @@ function discardRewrittenQuery(c: QueryContext): void {
 	// contextForToolResults only matches ids against contexts still in it.
 	activeQueryContexts.delete(c);
 	c.turnToolCallIds = [];
-	c.promptStream?.fail(new Error("conversation rewritten"));
+	c.promptStream?.fail(new Error("query discarded"));
 	c.promptStream = null;
 	// Settle the parked handlers before killing the CLI, for drainForAbort's
 	// reason: one left awaiting a dead subprocess never settles.
-	c.releasePendingToolCalls("Context was compacted; this query was discarded.");
+	c.releasePendingToolCalls(reason);
 	void discarded?.interrupt?.().catch(() => {});
 	try { discarded?.close?.(); } catch {}
 	// The CLI we just killed may still flush a record into the session JSONL, and
@@ -1915,8 +1977,34 @@ function discardRewrittenQuery(c: QueryContext): void {
 	// proves its own conversation is the one being rebuilt around.
 	const state = sessionStateFor(c.piSessionId);
 	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
-	if (c.piSessionId) historyRewrittenBySession.delete(c.piSessionId);
-	debug("provider: history rewritten under a parked query — discarded it, rebuilding from current history");
+}
+
+/** End a turn whose handler waits on a tool call pi never received (watchForLostToolCall).
+ *  Waiting longer cannot help: pi runs only the calls it was handed, so no result for
+ *  this one will ever be delivered. The query goes the way an aborted one does, and a
+ *  stream pi is waiting on fails with the reason. When pi is still running the calls it
+ *  did get, there is no stream yet; its results then find no parked query and resume
+ *  the turn from pi's history, which never held the lost call. */
+function failLostToolCall(c: QueryContext, toolCallId: string, toolName: string, waitedMs: number): void {
+	const waitedSeconds = Math.round(waitedMs / 1000);
+	const message = `Claude Code called ${toolName} [${toolCallId}], a tool call pi never received, and waited ${waitedSeconds}s for a result that cannot arrive. `
+		+ `The turn was ended instead of waiting; send a message to continue.`;
+	debug(`WARNING: ${message}`);
+	diagDump("lost_tool_call", {
+		toolName, toolCallId, waitedSeconds,
+		turnToolCallIds: c.turnToolCallIds,
+		deliveredToolCallIds: [...c.deliveredToolCallIds],
+		pendingToolCallIds: [...c.pendingToolCalls.keys()],
+		turnBlockTypes: c.turnOutput?.content.map((b: any) => b.type) ?? null,
+		streamOpen: Boolean(c.currentPiStream),
+	});
+	discardQuery(c, `The bridge never received tool call ${toolCallId} from Claude Code's message; the turn was ended.`);
+	if (c.currentPiStream && c.turnOutput) {
+		c.turnOutput.stopReason = "error";
+		c.turnOutput.errorMessage = message;
+		finalizeCurrentStream(c);
+	}
+	piUI?.notify(`Claude bridge: ${message}`, "error");
 }
 
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
@@ -2089,6 +2177,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.heldRateLimit = undefined;
 	queryCtx.pendingToolCalls.clear();
 	queryCtx.pendingResults.clear();
+	queryCtx.pendingSteerUuids.clear();
+	queryCtx.deliveredToolCallIds.clear();
 	// Stale ids would let a late result from the previous query route here via
 	// contextForToolResults — which now means pushing its steer into this
 	// query's stdin, not just mismatching a map.
@@ -2180,7 +2270,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const effort = effortForReasoning(model, options?.reasoning);
 
-	const extraArgs: Record<string, string | null> = { model: cliModel };
+	const extraArgs: Record<string, string | null> = { model: cliModel, "replay-user-messages": null };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
 	// Opus 4.7 defaults thinking.display to "omitted" (empty thinking text in stream).
 	// Force summarized so thinking_delta events arrive. See anthropics/claude-agent-sdk-python#830.
@@ -2216,6 +2306,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			...claudeCodeSettings(providerSettings),
 			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
 			includeGitInstructions: false,
+			// An output style is persona text written for standalone Claude Code, like
+			// the CLAUDE.md excluded above; pi owns the persona here (#220). This flag
+			// layer outranks user/project/local settings. AskClaude keeps the user's.
+			outputStyle: "default",
 		},
 		systemPrompt: {
 			type: "preset", preset: "claude_code",
@@ -2281,8 +2375,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// Background consumer — runs until query ends
 	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx)
-		.then(async ({ capturedSessionId }) => {
+		.then(async ({ capturedSessionId, failure }) => {
 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
+			// The same teardown as the SDK's own throw after an error result: the
+			// session mirror is dropped, so a steer never incorporated is rebuilt.
+			if (failure) throw failure;
 
 			// Discarded out from under: the query continuing the turn owns the context,
 			// the session and the stream. Capturing this one's session id here would put
