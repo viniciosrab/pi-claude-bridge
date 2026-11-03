@@ -4,6 +4,7 @@ import { buildSessionContext, keyHint, type ExtensionAPI, type ExtensionContext,
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-stream-args.js"; // fork: streaming tool args
+import "./fork-tool-streaming.js"; // fork: eager tool input streaming
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
