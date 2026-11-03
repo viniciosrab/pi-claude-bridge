@@ -112,6 +112,39 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// The same shorter-context shape arrives from an extension that rewrites pi's
+	// history in place (pi-fold, a `compress` tool, an extension's own compaction
+	// entry): no pi event marks those, so needsRebuild stays false. Taking the
+	// subagent path there runs the user's turn with no history and keeps resuming
+	// the pre-rewrite transcript afterwards (issues #77, #55).
+	it("rebuilds in place when a shorter context is not reentrant", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		try {
+			createSession({ sessionId, projectPath: cwd }).save();
+			__test.setSharedSession(null, { sessionId, cursor: 42, cwd });
+
+			const now = Date.now();
+			const result = __test.syncSharedSession([
+				{ role: "user", content: "First.", timestamp: now },
+				{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: now },
+				{ role: "user", content: "Second.", timestamp: now },
+			], cwd, undefined, undefined, null, false);
+
+			assert.equal(result.sessionId, sessionId, "a rewrite must rebuild under the same session id, not start an ephemeral one");
+			assert.equal(result.preserveSharedSession, undefined, "the rebuilt session is the shared session, not one to discard on completion");
+			assert.equal(__test.getSharedSession(null)?.cursor, 2, "the cursor follows the rewritten history");
+			assert.deepEqual(
+				openSession({ sessionId, projectPath: cwd }).messages.map((m) => m.type),
+				["user", "assistant"],
+				"the session file must hold the rewritten history",
+			);
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The rebuilt file holds one line per record, and a carried `@file` expansion
 	// is an `attachment` record — which `session.messages` filters out. Counting
 	// messages told every user who at-mentioned a file before switching providers

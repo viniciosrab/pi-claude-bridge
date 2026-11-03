@@ -1,6 +1,6 @@
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, isToolCallEventType, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-stream-args.js"; // fork: streaming tool args
@@ -764,6 +764,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 	piSessionId?: string | null,
+	isReentrant = true,
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -815,10 +816,14 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// It is NOT, despite an earlier comment here, the isolated compact-summary
 	// path: runIsolatedSummary never calls syncSharedSession at all.
 	//
-	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
+	// Reentrancy is the test rather than the message count, which is a superset:
+	// an extension that rewrites pi's history in place also shortens priors, and
+	// markRebuild only covers pi's own /compact and session_tree — there is no
+	// generic history-mutation event to hang an extension's rewrite off. Without
+	// this, a rewrite reaches CC for one query, has its session deleted here to
+	// preserve the parent's, and the next turn resumes the pre-rewrite transcript
+	// (issues #77, #55). A non-reentrant shorter context falls through to REBUILD.
+	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor && isReentrant) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
 		return { sessionId: null, preserveSharedSession: true };
@@ -968,10 +973,6 @@ function mapToolArgs(
 		const piKey = renames?.[key] ?? key;
 		if (!(piKey in result)) result[piKey] = value; // first alias wins
 	}
-	// Pi bash has no default timeout; add a safety default
-	if (toolName.toLowerCase() === "bash" && result.timeout == null) {
-		result.timeout = 120;
-	}
 	return result;
 }
 
@@ -1022,23 +1023,28 @@ const promptCaptures = sharedPromptCaptures((diagnostic) => {
 	);
 });
 
-/** Whatever a settled session left behind, named in one greppable line.
+/** Close every query a shutting-down pi session still holds. Scoped to that
+ *  session: subagents run in the parent's process and shut down while the
+ *  parent's query is still live.
  *
- *  Every one of these should be empty once the last turn ends, and each is a leak
- *  that costs something real: a retained context routes a later orphaned tool result
- *  into the delivery path and returns a stream nobody ends; a pending tool call is an
- *  MCP handler Claude Code is still waiting on; a live prompt stream is an unresolved
- *  ack. The activeQueryContexts leak was present on every single happy-path run and
- *  no test noticed, because nothing asserted that anything ends clean — so assert it
- *  where the real sessions are, and let diag/audit-warnings.mjs scan for it. */
-function reportLeaks(label: string): void {
-	const pendingCalls = [...activeQueryContexts].reduce((n, c) => n + c.pendingToolCalls.size, 0);
-	const liveStreams = [...activeQueryContexts].filter((c) => c.promptStream !== null).length;
-	if (activeQueryContexts.size === 0 && pendingCalls === 0 && liveStreams === 0) return;
-	debug(
-		`WARNING: ${label} left state behind — contexts=${activeQueryContexts.size} `
-		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams}`,
-	);
+ *  A live query here is expected: a tool that returns `terminate: true` ends pi's
+ *  run with Claude Code still parked on its result, and that child would keep the
+ *  process alive after pi is done (upstream #210). A context with no query is a
+ *  leak that costs something real: it routes a later orphaned tool result into the
+ *  delivery path and returns a stream nobody ends — so assert it where the real
+ *  sessions are, and let diag/audit-warnings.mjs scan for it. */
+function closeSessionQueries(piSessionId: string): void {
+	for (const c of [...activeQueryContexts]) {
+		if (c.piSessionId !== piSessionId) continue;
+		// An abort already killing this CLI ends its own turn and records the abort mark
+		// a later resume needs; discarding it here would skip both.
+		if (c.aborting) { debug("session_shutdown: leaving an aborting query to its own teardown"); continue; }
+		debug(
+			`${c.activeQuery ? "session_shutdown: closing parked query" : "WARNING: session_shutdown left a context with no query"} — `
+			+ `pendingToolCalls=${c.pendingToolCalls.size} promptStream=${c.promptStream !== null}`,
+		);
+		discardRewrittenQuery(c);
+	}
 }
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
@@ -2050,7 +2056,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Read before the consume below: with no query parked (an overflow retried
 	// after compaction), the session's mark is the only sign of the rewrite.
 	const historyRewritten = rewrittenUnderQuery || (piSessionId !== null && historyRewrittenBySession.has(piSessionId));
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId);
+	// Reentrant for this session's mirror only: a query of another pi session (a
+	// background subagent holding the top-level context) writes another CC file, so
+	// it must not send this session's rewritten history down the subagent path.
+	const sessionReentrant = [...activeQueryContexts].some((c) => c !== queryCtx && c.activeQuery !== null && sessionKey(c.piSessionId) === sessionKey(piSessionId));
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
@@ -2170,6 +2180,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	let wasAborted = false;
 	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
 	queryCtx.activeQuery = sdkQuery;
+	queryCtx.aborting = false; // the top-level context is reused across queries
 	activeQueryContexts.add(queryCtx);
 
 	// 4. Capture context for abort handling
@@ -2184,6 +2195,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const onAbort = () => {
 		if (wasAborted) return;
 		wasAborted = true;
+		abortCtx.aborting = true;
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
@@ -2656,7 +2668,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		forgetSessionCwd(ctx.sessionManager.getSessionId());
-		reportLeaks("session_shutdown");
+		closeSessionQueries(ctx.sessionManager.getSessionId());
 		clearSession("session_shutdown");
 	});
 
@@ -2682,6 +2694,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_compact", (event, ctx) =>
 		sponsorMarkRebuildForSession(ctx.sessionManager.getSessionId(), `session_compact:${event.reason}:willRetry=${event.willRetry}`));
 	pi.on("session_tree", (_event, ctx) => sponsorMarkRebuildForSession(ctx.sessionManager.getSessionId(), "session_tree"));
+
+	// Claude Code models expect bash to time out (CC's default is 120s); pi's bash has none.
+	// Set it on the execution copy pi hands tool_call handlers, not in the stored call, so
+	// pi's history keeps the arguments CC sent and a rebuild matches CC's records (#203).
+	pi.on("tool_call", (event, ctx) => {
+		if (isToolCallEventType("bash", event) && event.input.timeout == null && ctx.model?.provider === PROVIDER_ID) {
+			event.input.timeout = 120;
+		}
+	});
 
 	// --- Provider ---
 	//

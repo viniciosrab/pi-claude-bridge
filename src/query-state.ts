@@ -19,6 +19,9 @@ export interface PendingToolCall {
 export class QueryContext {
 	// Query-scoped (fully isolated per query)
 	activeQuery: unknown | null = null;
+	/** Set once this query's abort teardown has started: its own completion ends the
+	 *  turn and records the abort mark, so session_shutdown leaves it alone. */
+	aborting = false;
 	currentPiStream: AssistantMessageEventStream | null = null;
 	/** onResponse from the provider call that owns currentPiStream. */
 	currentOnResponse: SimpleStreamOptions["onResponse"] | undefined;
