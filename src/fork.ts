@@ -145,6 +145,9 @@ export interface AbortMark {
 	abortedPrompt?: string;
 	abortedFileOffset?: number;
 	abortedProcess?: CliProcess;
+	// Set when the turn ended at an API error result rather than an abort (see
+	// errorResultMarkable): pi may then retry the same prompt, which retryAfterError resumes.
+	errorResult?: boolean;
 }
 
 /** What a query records at its start, for the abort mark should it be aborted. */
@@ -262,7 +265,7 @@ export function abortedTurnAtStart(promptBlocks: { type: string }[] | null, prom
 
 /** The mark for an aborted query on session `sessionId`. A file the query did not
  *  resume started empty. */
-export function abortMark(turn: AbortedTurn, sessionId: string, now = Date.now()): AbortMark & Required<Omit<AbortMark, "abortedProcess">> {
+export function abortMark(turn: AbortedTurn, sessionId: string, now = Date.now()): AbortMark & Required<Omit<AbortMark, "abortedProcess" | "errorResult">> {
 	return { abortedAt: now, abortedPrompt: turn.prompt, abortedFileOffset: sessionId === turn.resumedId ? turn.fileOffset : 0, abortedProcess: turn.process };
 }
 
@@ -381,6 +384,92 @@ export function postAbortSync(
 	return resumable ? "resume" : "rebuild";
 }
 
+// Resume after an API error result. An error result (overloaded, rate limit, 5xx, quota)
+// ends the query, and the bridge used to drop the session and rebuild it from pi's
+// history on the next turn, re-caching everything (upstream #103). CC has persisted the
+// failed prompt and an `isApiErrorMessage` record it strips from later requests, so the
+// turn after the error resumes CC's own file as after an abort: a new prompt (pi keeps
+// the failed turn) through postAbortSync, and pi's retry of the same prompt (pi drops the
+// failed turn) cut back to the entry before it, through retryAfterError.
+
+/** The error result that ended a query, as consumeQuery fails it: unlike an SDK
+ *  exception or a CLI that died without a result, the turn reached CC's session file. */
+export class ErrorResultFailure extends Error {
+	constructor(message: string, readonly capturedSessionId?: string) {
+		super(message);
+	}
+}
+
+/** Whether a failed query may leave an error mark instead of dropping its session: it
+ *  ended at an error result, left no steer unincorporated, and ran no tool calls (CC's
+ *  file then holds a partial turn the next context may not match). */
+export function errorResultMarkable(
+	error: unknown,
+	c: { pendingSteerUuids: Set<string>; missedSteer: boolean; deliveredToolCallIds: Set<string>; turnToolCallIds: string[] },
+): error is ErrorResultFailure {
+	return error instanceof ErrorResultFailure && c.pendingSteerUuids.size === 0 && !c.missedSteer && c.deliveredToolCallIds.size === 0 && c.turnToolCallIds.length === 0;
+}
+
+function recordTexts(content: unknown): string[] {
+	if (typeof content === "string") return [content];
+	if (!Array.isArray(content)) return [];
+	return (content as { type?: string; text?: unknown }[]).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text as string);
+}
+
+/** The last chain entry of CC's session file written before the failed query started:
+ *  the failed prompt's record is the first user record past the mark's offset carrying
+ *  its text, and its ancestors are followed back past every record that query wrote.
+ *  `undefined` when there is no such record or entry (a failed first turn). */
+function entryBeforeFailedTurn(sessionId: string, mark: AbortMark, cwd: string): string | undefined {
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(getSessionPath(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR));
+	} catch {
+		return undefined;
+	}
+	const offset = mark.abortedFileOffset ?? 0;
+	const entries = new Map<string, { parentUuid: unknown; before: boolean }>();
+	let prompt: string | undefined;
+	for (let start = 0; start < bytes.length;) {
+		const newline = bytes.indexOf(0x0a, start);
+		const end = newline < 0 ? bytes.length : newline;
+		const before = start < offset;
+		let record: { type?: string; uuid?: unknown; parentUuid?: unknown; isMeta?: boolean; message?: { content?: unknown } };
+		try { record = JSON.parse(bytes.subarray(start, end).toString("utf8")); } catch { record = {}; }
+		start = end + 1;
+		if (typeof record.uuid !== "string") continue;
+		entries.set(record.uuid, { parentUuid: record.parentUuid, before });
+		if (!before && !prompt && record.type === "user" && !record.isMeta && recordTexts(record.message?.content).some((t) => t.includes(mark.abortedPrompt!))) prompt = record.uuid;
+	}
+	let at = prompt ? entries.get(prompt)?.parentUuid : undefined;
+	while (typeof at === "string") {
+		const entry = entries.get(at);
+		if (!entry) return undefined;
+		if (entry.before) return at;
+		at = entry.parentUuid;
+	}
+	return undefined;
+}
+
+/** Where pi's retry of a prompt that failed at an error result resumes CC's session:
+ *  the entry before the failed prompt, as `resumeSessionAt`, so the prompt is sent once
+ *  rather than twice. `undefined`: no error mark, a rewrite pending, a CLI that may still
+ *  write, a context other than the failed turn's own messages ending in the same prompt,
+ *  or no such entry; postAbortSync then rebuilds. */
+export function retryAfterError(
+	state: (AbortMark & { sessionId: string; cursor: number; needsRebuild?: boolean }) | null,
+	priorLength: number,
+	historyLength: number,
+	prompt: string,
+	cwd: string,
+	now = Date.now(),
+): string | undefined {
+	if (!state?.errorResult || state.abortedAt === undefined || state.needsRebuild || !state.abortedPrompt) return undefined;
+	if (historyLength !== state.cursor || priorLength >= state.cursor || prompt !== state.abortedPrompt) return undefined;
+	if (!abortSettled(state.abortedProcess, state.abortedAt, now)) return undefined;
+	return entryBeforeFailedTurn(state.sessionId, state, cwd);
+}
+
 // Resume after reopening. The bridge keeps each pi session's Claude Code session in
 // memory, so a pi session continued in a new process (a new window, `pi --continue`,
 // `/resume`) found none and rebuilt the whole conversation, re-caching all of it. Each
@@ -406,6 +495,7 @@ export interface MirrorRecord {
 	abortedFileOffset?: number;
 	abortedCliPid?: number;
 	abortedCliStartTime?: string;
+	abortedByError?: boolean;
 	// The completed turns of this CC session, oldest first, for a /fork of the pi
 	// session to start from (see forkPoint).
 	turns?: TurnBoundary[];
@@ -546,14 +636,14 @@ function recordedCli(record: MirrorRecord): CliProcess | undefined {
 }
 
 /** The fields a mirror file keeps of an abort mark. */
-export function mirrorAbortFields(mark: AbortMark): Pick<MirrorRecord, "abortedAt" | "abortedPrompt" | "abortedFileOffset" | "abortedCliPid" | "abortedCliStartTime"> {
+export function mirrorAbortFields(mark: AbortMark): Pick<MirrorRecord, "abortedAt" | "abortedPrompt" | "abortedFileOffset" | "abortedCliPid" | "abortedCliStartTime" | "abortedByError"> {
 	const cli = mark.abortedProcess?.spawned ? mark.abortedProcess : undefined;
-	return { abortedAt: mark.abortedAt, abortedPrompt: mark.abortedPrompt, abortedFileOffset: mark.abortedFileOffset, abortedCliPid: cli?.pid, abortedCliStartTime: cli?.startTime };
+	return { abortedAt: mark.abortedAt, abortedPrompt: mark.abortedPrompt, abortedFileOffset: mark.abortedFileOffset, abortedCliPid: cli?.pid, abortedCliStartTime: cli?.startTime, ...(mark.errorResult ? { abortedByError: true } : {}) };
 }
 
 function recordedAbortMark(record: MirrorRecord): AbortMark | undefined {
 	if (record.abortedAt === undefined) return undefined;
-	return { abortedAt: record.abortedAt, abortedPrompt: record.abortedPrompt, abortedFileOffset: record.abortedFileOffset, abortedProcess: recordedCli(record) };
+	return { abortedAt: record.abortedAt, abortedPrompt: record.abortedPrompt, abortedFileOffset: record.abortedFileOffset, abortedProcess: recordedCli(record), ...(record.abortedByError ? { errorResult: true } : {}) };
 }
 
 function readMirror(piSessionId: string): MirrorRecord | null {
@@ -586,8 +676,10 @@ export function loadMirror(piSessionId: string, history: { role?: string; timest
 	// branched inside that turn (say, /tree back to a tool result) dropped the answer
 	// CC's file still ends with. An aborted turn's cursor covers its prompt instead,
 	// and postAbortSync judges what follows it, as it does without a reload.
+	// A failed turn pi retries ends at the prompt the cursor covers (retryAfterError).
 	const abort = recordedAbortMark(record);
-	if (record.fingerprintLength !== record.cursor || history.length <= record.cursor) return null;
+	if (record.fingerprintLength !== record.cursor || history.length < record.cursor) return null;
+	if (history.length === record.cursor && !abort?.errorResult) return null;
 	if (!abort && (history[record.cursor] as { role?: string }).role !== "assistant") return null;
 	if (historyFingerprint(history.slice(0, record.cursor)) !== record.fingerprint) return null;
 	return { sessionId: record.sessionId, cursor: record.cursor, ...(abort ? { abort } : {}) };

@@ -204,7 +204,7 @@ describe("a pi session continued in a new process", () => {
 		assert.ok(resumed && resumed !== "cc-reopen-branch", "a branch CC never saw is imported into a new session");
 	});
 
-	it("does not resume, even in the same process, a session whose last turn failed", async () => {
+	it("does not resume, even in the same process, a session whose last turn crashed without a result", async () => {
 		const P = "pi-reopen-error";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
 		await firstWindow(P, "cc-reopen-error", u1);
@@ -218,6 +218,27 @@ describe("a pi session continued in a new process", () => {
 
 		const resumed = calls.at(-1).resume;
 		assert.ok(resumed && resumed !== "cc-reopen-error", "the retry rebuilds rather than resume the failed attempt's session");
+	});
+
+	// fork: error resume (upstream #103). An error result means CC recorded the failed
+	// turn, so even a new process resumes that file; see tests/unit-error-resume.mjs.
+	it("resumes, even in a new process, a session whose last turn ended at an error result", async () => {
+		const P = "pi-reopen-error-result";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
+		await firstWindow(P, "cc-reopen-error-result", u1);
+		const promptWritten = () => writeFileSync(sessionFile("cc-reopen-error-result"), `${readFileSync(sessionFile("cc-reopen-error-result"), "utf8")}${JSON.stringify({ type: "user", uuid: "p2", parentUuid: null, message: { role: "user", content: "next" } })}\n`);
+		scripts.push({ label: "turn 2", steps: [init("cc-reopen-error-result"), promptWritten, { type: "result", subtype: "success", is_error: true, result: "API Error: 529 overloaded" }] });
+		await call(P, [u1, a1, u2]).result();
+		assert.equal(getSharedSession(P)?.errorResult, true, "an error result keeps the session with an error mark");
+		await settle();
+		newProcess();
+		const mirror = join(mirrorDir(), readdirSync(mirrorDir()).find((f) => f.includes(P)));
+		writeFileSync(mirror, JSON.stringify({ ...JSON.parse(readFileSync(mirror, "utf8")), abortedAt: Date.now() - 60_000 }));
+
+		const failed = { ...say(""), content: [], stopReason: "error", errorMessage: "API Error: 529 overloaded" };
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [u1, a1, u2, failed, user("again")]).result();
+		assert.equal(calls.at(-1).resume, "cc-reopen-error-result");
 	});
 
 	it("a new pi session still starts clean", async () => {
