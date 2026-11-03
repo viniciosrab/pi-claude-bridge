@@ -9,7 +9,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
-import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, historyFingerprint, loadMirror, mirrorAbortFields, persistedAbortMark, postAbortSync, saveMirror, trackCliProcess, withProviderSettingSources, withStderrTail, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
+import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, ErrorResultFailure, errorResultMarkable, retryAfterError, historyFingerprint, loadMirror, mirrorAbortFields, persistedAbortMark, postAbortSync, saveMirror, trackCliProcess, withProviderSettingSources, withStderrTail, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
@@ -222,6 +222,7 @@ interface SessionState {
 	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
 	abortedAt?: AbortMark["abortedAt"]; abortedPrompt?: AbortMark["abortedPrompt"]; abortedFileOffset?: AbortMark["abortedFileOffset"]; abortedProcess?: AbortMark["abortedProcess"]; // fork: abort resume
+	errorResult?: AbortMark["errorResult"]; // fork: error resume
 }
 
 /**
@@ -689,6 +690,7 @@ async function runIsolatedSummary(
 interface SyncResult {
 	sessionId: string | null;
 	preserveSharedSession?: boolean;
+	resumeSessionAt?: string; // fork: error resume
 }
 
 /**
@@ -786,6 +788,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	const sharedSession = sessionStateFor(piSessionId);
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
+	const forkRetry = retryAfterError(sharedSession, priorMessages.length, history.length, abortedTurnAtStart(extractUserPromptBlocks(messages), extractUserPrompt(messages) ?? "", null, cwd).prompt, cwd); // fork: error resume
+	if (forkRetry) return { ...resumeAfterAbort(piSessionId, sharedSession!, priorMessages.length, cwd), resumeSessionAt: forkRetry }; // fork: error resume
 	const forkAbort = postAbortSync(sharedSession, priorMessages, cwd); // fork: abort resume
 	if (forkAbort === "resume") return resumeAfterAbort(piSessionId, sharedSession!, priorMessages.length, cwd); // fork: abort resume
 	if (forkAbort === "rebuild") { sharedSession!.needsRebuild = true; if (piSessionId) dropMirror(piSessionId); } // fork: abort resume
@@ -1655,7 +1659,7 @@ async function consumeQuery(
 				// The failure ends the query. Closing stdin does not: Claude Code still
 				// runs a steer it had queued, and that turn's stop reason would overwrite
 				// this one. The caller tears the query down as a failed one.
-				failure = new Error(resultError);
+				failure = new ErrorResultFailure(resultError, capturedSessionId); // fork: error resume
 				break;
 			}
 		}
@@ -1870,14 +1874,15 @@ function recordMirror(c: QueryContext, sent: Context["messages"], cwd: string, a
  *  `prior` is the mirror before the abort, so a rewrite or missed steer still rebuilds.
  *  The mark goes on the mirror file too, with the aborted CLI's pid, so the same
  *  decision survives a /reload or a new process. An ephemeral (preserve-shared) query
- *  keeps upstream's marking of its parent. */
-function markAbortedSession(c: QueryContext, prior: SessionState | null, capturedSessionId: string | undefined, cursor: number, cwd: string, preserveShared: boolean, turn: AbortedTurn, sent: Context["messages"]): void {
+ *  keeps upstream's marking of its parent. fork: error resume: a query that ended at an
+ *  error result is recorded the same way, with `errorResult` set. */
+function markAbortedSession(c: QueryContext, prior: SessionState | null, capturedSessionId: string | undefined, cursor: number, cwd: string, preserveShared: boolean, turn: AbortedTurn, sent: Context["messages"], errorResult = false): void {
 	const sessionId = capturedSessionId ?? prior?.sessionId;
 	if (preserveShared || !sessionId) {
 		if (c.piSessionId) dropMirror(c.piSessionId);
 		return;
 	}
-	const mark = abortMark(turn, sessionId);
+	const mark = { ...abortMark(turn, sessionId), errorResult: errorResult || undefined };
 	setSessionStateFor(c.piSessionId, {
 		...prior,
 		sessionId,
@@ -1889,14 +1894,14 @@ function markAbortedSession(c: QueryContext, prior: SessionState | null, capture
 		...mark,
 	});
 	recordMirror(c, sent, cwd, mark);
-	debug(`provider: abort recorded, session ${sessionId.slice(0, 8)} resumes once settled`);
+	debug(`provider: ${errorResult ? "error result" : "abort"} recorded, session ${sessionId.slice(0, 8)} resumes once settled`);
 }
 
 /** fork: abort resume. REUSE across an aborted turn, clearing the abort mark, on disk
  *  too: this turn's completion records the mirror again. */
 function resumeAfterAbort(piSessionId: string | null, state: SessionState, cursor: number, cwd: string): SyncResult {
 	if (piSessionId) dropMirror(piSessionId);
-	setSessionStateFor(piSessionId, { ...state, cursor, cwd, abortedAt: undefined, abortedPrompt: undefined, abortedFileOffset: undefined, abortedProcess: undefined, forceRotate: undefined });
+	setSessionStateFor(piSessionId, { ...state, cursor, cwd, abortedAt: undefined, abortedPrompt: undefined, abortedFileOffset: undefined, abortedProcess: undefined, errorResult: undefined, forceRotate: undefined });
 	debug(`Case 3 post-abort: resuming session ${state.sessionId.slice(0, 8)} across the aborted turn, cursor=${cursor}`);
 	debug(`syncResult: path=reuse sessionId=${state.sessionId} cursor=${cursor} post-abort`);
 	return { sessionId: state.sessionId };
@@ -2319,6 +2324,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		...(effort ? { effort } : {}),
 		...(mcpServers ? { mcpServers } : {}),
 		...(resumeSessionId ? { resume: resumeSessionId } : {}),
+		...(syncResult.resumeSessionAt ? { resumeSessionAt: syncResult.resumeSessionAt } : {}), // fork: error resume
 		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 		...makeCliDebugOptions("provider"),
 	};
@@ -2378,7 +2384,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		.then(async ({ capturedSessionId, failure }) => {
 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
 			// The same teardown as the SDK's own throw after an error result: the
-			// session mirror is dropped, so a steer never incorporated is rebuilt.
+			// session mirror is dropped, so a steer never incorporated is rebuilt
+			// (fork: error resume, otherwise the session is marked for resume).
 			if (failure) throw failure;
 
 			// Discarded out from under: the query continuing the turn owns the context,
@@ -2452,6 +2459,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 				markAbortedSession(queryCtx, state, undefined, Math.max(context.messages.length, queryCtx.latestCursor), cwd, Boolean(syncResult.preserveSharedSession), abortedTurn, context.messages); // fork: abort resume
 				queryCtx.heldRateLimit = undefined;
+			} else if (errorResultMarkable(error, queryCtx) && !syncResult.preserveSharedSession && !sessionStateFor(queryCtx.piSessionId)?.needsRebuild) { // fork: error resume
+				// CC recorded the failed turn, so the next one resumes its file, as after an abort.
+				markAbortedSession(queryCtx, sessionStateFor(queryCtx.piSessionId), error.capturedSessionId, Math.max(context.messages.length, queryCtx.latestCursor), cwd, false, abortedTurn, context.messages, true);
 			} else {
 				// Drop this session's mirror: its conversation is in an unknown
 				// state after the error. Other sessions' mirrors stay — one
