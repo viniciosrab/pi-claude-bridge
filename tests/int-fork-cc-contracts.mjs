@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, query } from "@anthropic-ai/claude-agent-sdk";
 import { getSessionPath } from "cc-session-io";
 import { readFileSync, statSync } from "node:fs";
 import { ABORT_SETTLE_MS, trackCliProcess } from "../src/fork.js";
@@ -109,4 +109,37 @@ test("a resumed result's duration_api_ms is the session's running total, its dur
 	assert.ok(r2.duration_api_ms > r2.duration_ms, `duration_api_ms ${r2.duration_api_ms} fits inside turn 2's ${r2.duration_ms}ms: it may be per turn now`);
 	assert.ok(r2.duration_api_ms - r1.duration_api_ms <= r2.duration_ms,
 		`the growth ${r2.duration_api_ms - r1.duration_api_ms}ms exceeds turn 2's duration_ms ${r2.duration_ms}: the difference is not this turn's API time`);
+});
+
+test("a forkSession copy of a session cut at a turn's last entry reads the conversation back from the cache", { timeout: 300_000 }, async () => {
+	// A pi session made by /fork starts from the SDK's forkSession of its parent's CC
+	// session, cut at the last entry the kept turn left (src/fork.ts startFromParentFork),
+	// instead of a rebuild, which re-caches the conversation. Pin that the copy gets a
+	// new id, leaves the parent's file untouched, and reproduces the parent's request
+	// bytes: resumed, its first request reads back all the parent's turn 2 wrote.
+	const firstUsage = async (prompt, extra) => {
+		let sessionId, usage;
+		for await (const m of query({ prompt, options: providerOptions(extra) })) {
+			if (m.type === "system" && m.subtype === "init") sessionId = m.session_id;
+			if (m.type === "assistant" && !usage) usage = m.message.usage;
+		}
+		return { sessionId, usage };
+	};
+	const pad = Array.from({ length: 400 }, (_, i) => `line ${i}: the quick brown fox jumps over the lazy dog`).join("\n");
+	const { sessionId } = await firstUsage(`Remember this text, then reply with just "ok".\n\n${pad}`);
+	const second = await firstUsage("What is line 7? Answer in five words.", { resume: sessionId });
+	const file = getSessionPath(sessionId, CWD, process.env.CLAUDE_CONFIG_DIR);
+	const parentBytes = readFileSync(file, "utf8");
+	const lastEntry = parentBytes.trim().split("\n").map((l) => JSON.parse(l)).filter((r) => typeof r.uuid === "string").at(-1).uuid;
+
+	const fork = await forkSession(sessionId, { dir: CWD, upToMessageId: lastEntry });
+	assert.notEqual(fork.sessionId, sessionId, "the fork took the parent's session id");
+	const forked = await firstUsage("Reply with just the word: done.", { resume: fork.sessionId });
+	assert.equal(readFileSync(file, "utf8"), parentBytes, "forking or resuming the fork wrote the parent's file");
+
+	// What the parent's turn 2 left in the cache: the prefix up to its breakpoint.
+	const written = (u) => (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+	console.log(`parent turn 2 cached: ${written(second.usage)} tokens; fork's first request: cacheRead=${forked.usage.cache_read_input_tokens} cacheWrite=${forked.usage.cache_creation_input_tokens}`);
+	assert.ok(forked.usage.cache_read_input_tokens >= written(second.usage),
+		`the fork read ${forked.usage.cache_read_input_tokens} tokens from the cache, less than the ${written(second.usage)} the parent's turn 2 wrote: its request bytes differ from the parent's`);
 });
