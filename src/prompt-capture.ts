@@ -1,6 +1,7 @@
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatProjectContext } from "./agents-md.js";
 import { debugLogPath } from "./log-paths.js";
+import { assertNoPiPreamble } from "./fork-prompt-guard.js"; // fork: pi 1.5 preamble guard
 import { renderSkillsBlock, type SkillReadTool } from "./skills.js";
 
 // What pi assembled for one agent, kept so the bridge can append only the
@@ -361,6 +362,7 @@ function projectCapture(
 			parts.push({ label: `the ${name} section`, text: `<${name}>\n${content}\n</${name}>` });
 		}
 		assertSendablePrompt(parts, capture);
+		assertNoPiPreamble(parts, capture); // fork: pi 1.5 preamble guard
 		return parts.length > 0 ? parts.map((part) => part.text).join("\n\n") : undefined;
 	} finally {
 		visiting.delete(capture);
