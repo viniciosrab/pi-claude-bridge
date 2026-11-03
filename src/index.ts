@@ -3,6 +3,7 @@ import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
+import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-stream-args.js"; // fork: streaming tool args
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
@@ -1286,7 +1287,9 @@ function processStreamEvent(
 			c.currentPiStream!.push({ type: "thinking_delta", contentIndex: index, delta: event.delta.thinking, partial: c.turnOutput });
 		} else if (event.delta?.type === "input_json_delta" && block.type === "toolCall") {
 			block.partialJson += event.delta.partial_json;
+			rememberToolArgs(block); // fork: streaming tool args
 			block.arguments = parsePartialJson(block.partialJson, block.arguments);
+			block.arguments = streamingToolArgs(block); // fork: streaming tool args
 			c.currentPiStream!.push({ type: "toolcall_delta", contentIndex: index, delta: event.delta.partial_json, partial: c.turnOutput });
 		} else if (event.delta?.type === "signature_delta" && block.type === "thinking") {
 			block.thinkingSignature = (block.thinkingSignature ?? "") + event.delta.signature;
@@ -1307,6 +1310,7 @@ function processStreamEvent(
 			c.currentPiStream!.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: c.turnOutput });
 		} else if (block.type === "toolCall") {
 			c.turnSawToolCall = true;
+			block.arguments = toolArgsFallback(block); // fork: streaming tool args
 			block.arguments = mapToolArgs(
 				block.name, parsePartialJson(block.partialJson, block.arguments),
 			);
