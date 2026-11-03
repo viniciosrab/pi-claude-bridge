@@ -8,12 +8,42 @@
  *
  * Only the display may see a prefix. The arguments pi runs come from the whole
  * input at content_block_stop, and a prefix must never become them.
+ *
+ * With pi-ai's ToolCallArgumentsStream (pi-ai 1.5+) each delta is parsed once
+ * instead of the whole text on every delta. Every case runs without it and with
+ * a double of it, and with pi-ai's own class when the installed pi-ai has one.
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { parseStreamingJson } from "@earendil-works/pi-ai";
 import { QueryContext } from "../src/query-state.js";
+import { setToolCallArgumentsStreamForTests } from "../src/fork-stream-args.js";
 
 const { __test } = await import("../src/index.js");
+
+/** ToolCallArgumentsStream's surface (append/text/finish), recording each append. */
+class RecordingArgumentsStream {
+	static appends = [];
+	#text = "";
+	get text() { return this.#text; }
+	append(delta) {
+		RecordingArgumentsStream.appends.push(delta);
+		this.#text += delta;
+		const value = parseStreamingJson(this.#text);
+		return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+	}
+	finish() {
+		try { return { arguments: JSON.parse(this.#text) }; } catch (e) { return { arguments: {}, argumentsError: String(e) }; }
+	}
+}
+
+const detected = setToolCallArgumentsStreamForTests(undefined);
+setToolCallArgumentsStreamForTests(detected);
+const modes = [
+	["without ToolCallArgumentsStream", undefined],
+	["with an incremental arguments stream", RecordingArgumentsStream],
+	...(detected ? [["with pi-ai's ToolCallArgumentsStream", detected]] : []),
+];
 
 const fakeModel = { api: "anthropic-messages", provider: "anthropic", id: "test-model" };
 const toolMap = new Map([["mcp__custom-tools__run_script", "run_script"]]);
@@ -24,7 +54,12 @@ function fakeStream() {
 	const events = [];
 	const push = (e) => {
 		const call = e.partial?.content?.[e.contentIndex];
-		events.push({ type: e.type, arguments: call?.type === "toolCall" ? structuredClone(call.arguments) : undefined, toolCall: e.toolCall && structuredClone(e.toolCall) });
+		events.push({
+			type: e.type,
+			arguments: call?.type === "toolCall" ? structuredClone(call.arguments) : undefined,
+			partialJson: call?.type === "toolCall" ? call.partialJson : undefined,
+			toolCall: e.toolCall && structuredClone(e.toolCall),
+		});
 	};
 	return { events, push, end: () => events.push({ type: "end" }) };
 }
@@ -51,7 +86,10 @@ const toolCall = (deltas) => [
 	streamEvent({ type: "message_stop" }),
 ];
 
-describe("a streaming tool call's arguments", () => {
+for (const [mode, argumentsStream] of modes) describe(`a streaming tool call's arguments, ${mode}`, () => {
+	before(() => setToolCallArgumentsStreamForTests(argumentsStream));
+	after(() => setToolCallArgumentsStreamForTests(detected));
+
 	it("grow with each delta instead of staying empty until the JSON closes", async () => {
 		const c = makeCtx();
 		const stream = c.currentPiStream;
@@ -89,5 +127,33 @@ describe("a streaming tool call's arguments", () => {
 		const end = stream.events.find((e) => e.type === "toolcall_end");
 		assert.deepStrictEqual(end.toolCall.arguments, {});
 		assert.deepStrictEqual(c.turnOutput.content.map((b) => [b.type, b.arguments]), [["toolCall", {}]]);
+	});
+});
+
+describe("a streaming tool call with an incremental arguments stream", () => {
+	before(() => setToolCallArgumentsStreamForTests(RecordingArgumentsStream));
+	after(() => setToolCallArgumentsStreamForTests(detected));
+
+	it("parses each delta once instead of the whole text on every delta", async () => {
+		RecordingArgumentsStream.appends = [];
+		const c = makeCtx();
+		const stream = c.currentPiStream;
+		const deltas = ['{"path":"a.ts",', '"content":"const x', ' = 1;\\n', 'export {x};"}'];
+		await consume(c, toolCall(deltas));
+
+		// Only the new text reaches the stream, once per delta.
+		assert.deepStrictEqual(RecordingArgumentsStream.appends, deltas);
+		const partials = stream.events.filter((e) => e.type === "toolcall_delta");
+		assert.deepStrictEqual(partials.map((e) => e.arguments), [
+			{ path: "a.ts" },
+			{ path: "a.ts", content: "const x" },
+			{ path: "a.ts", content: "const x = 1;\n" },
+			{ path: "a.ts", content: "const x = 1;\nexport {x};" },
+		]);
+		// Upstream's JSON.parse of partialJson sees nothing to parse while the call streams.
+		assert.deepStrictEqual(partials.map((e) => e.partialJson), ["", "", "", ""]);
+		const end = stream.events.find((e) => e.type === "toolcall_end");
+		assert.deepStrictEqual(end.toolCall.arguments, { path: "a.ts", content: "const x = 1;\nexport {x};" });
+		assert.strictEqual(end.toolCall.partialJson, undefined);
 	});
 });
