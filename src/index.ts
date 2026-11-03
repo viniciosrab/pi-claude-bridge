@@ -12,6 +12,7 @@ import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.
 import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
+import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
@@ -867,12 +868,14 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 // The SDK's query(), or a test double (see setQuery).
 let queryImpl: typeof query = query;
 queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
+if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 
 // @internal
 export const __test = {
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
 		queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
+		if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 	},
 	resetSharedSession(piSessionId?: string | null) {
 		// No id: full reset (the pre-map semantics — tests start from a blank slate).

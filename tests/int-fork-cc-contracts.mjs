@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+// Fork-only executable contracts: undocumented Claude Code behavior the fork's own
+// code relies on, asserted against the installed CC + SDK. Kept out of upstream's
+// tests/int-cc-contracts.mjs so the fork's commits never edit an upstream file.
+//
+// Requires: ANTHROPIC_API_KEY or CC logged in. Must run OUTSIDE the sandbox —
+// CC persists session state under ~/.claude.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+const CWD = process.cwd();
+const MODEL = "claude-haiku-4-5";
+
+/** Options of a provider-path query: no tools, no MCP, one turn. */
+function providerOptions(extra = {}) {
+	return {
+		cwd: CWD,
+		model: MODEL,
+		tools: [],
+		permissionMode: "bypassPermissions",
+		env: { ...process.env, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+		extraArgs: { "strict-mcp-config": null },
+		maxTurns: 1,
+		...extra,
+	};
+}
+
+/** The query's result message. */
+async function resultOf(q) {
+	let result = null;
+	for await (const message of q) {
+		if (message.type === "result") result = message;
+	}
+	return result;
+}
+
+test("a resumed result's duration_api_ms is the session's running total, its duration_ms this turn's", { timeout: 180_000 }, async () => {
+	// The fork's debug timing line subtracts the total it last saw for the CC
+	// session (src/fork-turn-timing.ts). If CC ever reports API time per turn,
+	// that subtraction would log near-zero turns, so pin both fields. Turn 1 is
+	// long and turn 2 short: a per-turn API time can never exceed its own turn.
+	const turn = async (prompt, resume) => {
+		const startedAt = performance.now();
+		const result = await resultOf(query({ prompt, options: providerOptions(resume ? { resume } : {}) }));
+		assert.equal(result?.subtype, "success", `turn failed: ${JSON.stringify(result)}`);
+		return { result, wallMs: performance.now() - startedAt };
+	};
+
+	const first = await turn("Count from 1 to 80, numbers separated by single spaces, nothing else.");
+	const second = await turn("Reply OK.", first.result.session_id);
+	const [r1, r2] = [first.result, second.result];
+	console.log(`turn 1: duration_ms=${r1.duration_ms} duration_api_ms=${r1.duration_api_ms}; turn 2 (resumed): duration_ms=${r2.duration_ms} duration_api_ms=${r2.duration_api_ms} wall=${Math.round(second.wallMs)}ms`);
+
+	assert.equal(r2.session_id, r1.session_id, "the resume did not continue the same CC session");
+	assert.ok(r2.duration_ms <= second.wallMs, `duration_ms ${r2.duration_ms} exceeds turn 2's own wall time ${Math.round(second.wallMs)}ms: no longer per turn`);
+	assert.ok(r2.duration_api_ms > r1.duration_api_ms, `duration_api_ms ${r2.duration_api_ms} did not grow past turn 1's ${r1.duration_api_ms}: no longer a running total`);
+	assert.ok(r2.duration_api_ms > r2.duration_ms, `duration_api_ms ${r2.duration_api_ms} fits inside turn 2's ${r2.duration_ms}ms: it may be per turn now`);
+	assert.ok(r2.duration_api_ms - r1.duration_api_ms <= r2.duration_ms,
+		`the growth ${r2.duration_api_ms - r1.duration_api_ms}ms exceeds turn 2's duration_ms ${r2.duration_ms}: the difference is not this turn's API time`);
+});
