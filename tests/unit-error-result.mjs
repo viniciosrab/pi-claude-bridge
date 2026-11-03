@@ -197,18 +197,22 @@ describe("error results", () => {
 		assert.strictEqual(stream.events.at(-2).type, "done");
 	});
 
-	// A turn that ended on a tool call has already closed its pi stream, and the
-	// guard that suppresses content events for a closed stream used to swallow the
-	// result message with it — so a 429 mid-tool set no stopReason, no
-	// errorMessage, and logged nothing at all.
-	it("records a failure that arrives after the turn ended on a tool call", async () => {
+	// A turn that ended on a tool call has already closed its pi stream, and its
+	// turnOutput is the message pi recorded (issue #181). A failure arriving then
+	// still closes stdin and consumes the rate-limit rejection, but leaves that
+	// message alone.
+	it("leaves a turn that ended on a tool call unchanged", async () => {
 		const c = makeCtx();
 		c.currentPiStream = null; // what the tool boundary leaves behind
+		let stdinEnded = false;
+		c.promptStream = { end: () => { stdinEnded = true; } };
+		const finalized = structuredClone(c.turnOutput);
 
-		await consume(c, [errorResult]);
+		await consume(c, [{ type: "rate_limit_event", rate_limit_info: { status: "rejected" } }, errorResult]);
 
-		assert.strictEqual(c.turnOutput.stopReason, "error");
-		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
+		assert.deepStrictEqual(c.turnOutput, finalized);
+		assert.ok(stdinEnded);
+		assert.strictEqual(c.rateLimitRejection, null);
 	});
 
 	it("reports the dedicated error subtypes", async () => {

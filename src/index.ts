@@ -1345,12 +1345,7 @@ function processStreamEvent(
 		// assistant message for this turn, but currentPiStream=null causes
 		// consumeQuery to skip it. The MCP handler blocks the generator until
 		// pi delivers the tool result via the next streamSimple call.
-		c.turnOutput.stopReason = "toolUse";
-		const stream = c.currentPiStream;
-		stream!.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-		markStreamComplete(stream);
-		stream!.end();
-		c.currentPiStream = null;
+		endTurnOnToolUse(c);
 
 		// Cursor is updated by the next streamSimple call (tool result delivery path)
 		// which sets cursor = context.messages.length with the post-tool-result context.
@@ -1360,6 +1355,55 @@ function processStreamEvent(
 	if (event?.type !== "message_stop" && event?.type !== "ping") {
 		debug("processStreamEvent: unhandled event type", event?.type);
 	}
+}
+
+/** End pi's stream on the tool calls the turn holds, so pi can run them. Whatever
+ *  the SDK yields for this turn afterwards finds no stream and is skipped. */
+function endTurnOnToolUse(c: QueryContext): void {
+	if (!c.currentPiStream || !c.turnOutput) return;
+	c.clearToolUseSettle();
+	c.turnOutput.stopReason = "toolUse";
+	const stream = c.currentPiStream;
+	stream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
+	markStreamComplete(stream);
+	stream.end();
+	c.currentPiStream = null;
+}
+
+/** How long a non-streaming fallback's tool-use stop waits for another block. Claude
+ *  Code writes all of the message's blocks in one go, so this only has to outlast the
+ *  gaps between reads of the SDK's stdout; it is paid once per fallback turn, which a
+ *  stalled stream makes rare and slow already. */
+const FALLBACK_SETTLE_MS = 100;
+
+/** End the stream on a fallback's tool calls once no further block has followed the
+ *  last for FALLBACK_SETTLE_MS.
+ *
+ *  A non-streaming answer reaches the SDK as one `assistant` message per content
+ *  block, all under one message id, and nothing marks the last (every block carries
+ *  stop_reason "tool_use"). Ending the stream at the first tool_use lost the rest of
+ *  the message, which Claude Code had dispatched and waited on. Waiting for the next
+ *  SDK message cannot work: CC sends none until its tool calls are answered, and pi
+ *  cannot answer a stream that has not ended. */
+function settleFallbackToolUse(c: QueryContext, stream: AssistantMessageEventStream): void {
+	c.clearToolUseSettle();
+	const seq = c.toolUseSettleSeq;
+	const timer = setTimeout(() => {
+		// Timers run ahead of the poll phase, so after a stalled event loop this can fire
+		// with the next block already read but not yet delivered. Check again once it has been.
+		setImmediate(() => {
+			if (c.currentPiStream !== stream || c.toolUseSettleSeq !== seq) return;
+			debug(`processAssistantMessage: fallback settled on ${c.turnToolCallIds.length} tool call(s)`);
+			endTurnOnToolUse(c);
+		});
+	}, FALLBACK_SETTLE_MS);
+	timer.unref?.();
+	c.toolUseSettle = { timer, stream };
+}
+
+/** End a pending fallback stop now: the SDK moved past the message's blocks, or ended. */
+function flushFallbackToolUse(c: QueryContext): void {
+	if (c.toolUseSettle?.stream === c.currentPiStream) endTurnOnToolUse(c);
 }
 
 /** Remove the blocks of the message that just stopped which never got their own
@@ -1451,7 +1495,11 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 		if (!id || !c.turnStreamMessageId || id === c.turnStreamMessageId) return;
 		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `non-streaming fallback ${id}`);
 	}
-	c.turnToolCallIds = [];
+	// A fallback arrives as one assistant message per block, all under one id: only the
+	// message's first block starts the turn's tool call ids over.
+	if (!assistantMsg.id || assistantMsg.id !== c.turnFallbackMessageId) c.turnToolCallIds = [];
+	c.turnFallbackMessageId = assistantMsg.id;
+	c.toolUseSettleSeq++;
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
 		if (block.type === "text" && block.text) {
@@ -1492,15 +1540,9 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	}
 	if (assistantMsg.usage && c.turnOutput) recordUsage(c.turnOutput, assistantMsg.usage, model);
 
-	// End the stream on tool_use, same as processStreamEvent's message_stop handler.
-	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) {
-		c.turnOutput.stopReason = "toolUse";
-		const stream = c.currentPiStream;
-		stream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-		markStreamComplete(stream);
-		stream.end();
-		c.currentPiStream = null;
-	}
+	// End the stream on tool_use, same as processStreamEvent's message_stop handler —
+	// once the message's other blocks are in, which only a pause can tell.
+	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) settleFallbackToolUse(c, c.currentPiStream);
 }
 
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
@@ -1516,6 +1558,8 @@ async function consumeQuery(
 	queryCtx: QueryContext,
 ): Promise<{ capturedSessionId?: string }> {
 	let capturedSessionId: string | undefined;
+	/** An error result ended the turn (upstream's #172 `failure`, which the fork lacks). */
+	let failure = false;
 
 	for await (const message of sdkQuery) {
 		// CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery
@@ -1533,9 +1577,9 @@ async function consumeQuery(
 		// - stdin: nothing else closes the CLI's stdin now that the prompt is a
 		//   streamed generator (isSingleUserTurn=false), so missing this hangs the query.
 		// - the failure a `result` carries: it is the only record that the turn
-		//   failed at all. Behind the guard, a 429 arriving at a tool boundary set
-		//   no stopReason, no errorMessage, and logged nothing — the turn simply
-		//   ended empty.
+		//   failed at all. Behind the guard, a 429 arriving at a tool boundary
+		//   logged nothing. It fails turnOutput only while the turn's stream is
+		//   open; once ended, turnOutput is the message pi already recorded.
 		// - rate-limit events: notifications to the user, which are most likely to
 		//   fire during exactly the long tool-using turns the guard was skipping.
 		let resultError: string | undefined;
@@ -1551,7 +1595,8 @@ async function consumeQuery(
 					queryCtx.rateLimitRejection = null;
 				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
-				if (queryCtx.turnOutput) {
+				failure = true;
+				if (queryCtx.turnOutput && queryCtx.currentPiStream) {
 					queryCtx.turnOutput.stopReason = "error";
 					queryCtx.turnOutput.errorMessage = resultError;
 				}
@@ -1593,6 +1638,11 @@ async function consumeQuery(
 		}
 		if (!queryCtx.currentPiStream || !queryCtx.turnOutput) continue;
 
+		// A fallback's blocks come back to back, so any of these means the SDK is past them.
+		// fork: an error result still reaches here (the fork has no #172 break); it fails the turn, so only drop the wait.
+		if (failure) queryCtx.clearToolUseSettle();
+		else if (message.type === "stream_event" || message.type === "user" || message.type === "result") flushFallbackToolUse(queryCtx);
+
 		switch (message.type) {
 			case "stream_event":
 				processStreamEvent(message, customToolNameToPi, model, queryCtx);
@@ -1633,6 +1683,13 @@ async function consumeQuery(
 				break;
 		}
 	}
+
+	// The query ended behind a fallback's last block: nothing more is coming to wait for.
+	// An abort or a failure is not that — the caller ends the stream as aborted or
+	// failed, and the calls Claude Code dispatched will never be answered, so only
+	// drop the wait.
+	if (wasAborted() || failure) queryCtx.clearToolUseSettle();
+	else flushFallbackToolUse(queryCtx);
 
 	// DEBUG: trace when consumeQuery exits
 	debug(`consumeQuery: for-await loop exited, wasAborted=${wasAborted()}, capturedSessionId=${capturedSessionId?.slice(0, 8) ?? "none"}`);
@@ -2240,11 +2297,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 				markAbortedSession(queryCtx, state, capturedSessionId, Math.max(context.messages.length, queryCtx.latestCursor), cwd, Boolean(syncResult.preserveSharedSession), abortedTurn, context.messages); // fork: abort resume
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
-				if (queryCtx.turnOutput) {
+				// A turn whose stream already ended was returned to pi; failing it now
+				// would rewrite a message pi has recorded (issue #181).
+				const stream = queryCtx.currentPiStream;
+				if (stream && queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
 					queryCtx.turnOutput.errorMessage = "Operation aborted";
 				}
-				const stream = queryCtx.currentPiStream;
 				stream?.push({ type: "error", reason: "aborted", error: queryCtx.turnOutput! });
 				markStreamComplete(stream);
 				stream?.end();
@@ -2301,7 +2360,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				if (queryCtx.piSessionId) dropMirror(queryCtx.piSessionId); // fork: reopen resume
 			}
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
-			if (queryCtx.turnOutput) {
+			if (queryCtx.turnOutput && queryCtx.currentPiStream) {
 				queryCtx.turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
 				// The SDK drops its copy of the result text if any message follows the error
 				// result, so prefer the cause consumeQuery recorded off the result itself.
