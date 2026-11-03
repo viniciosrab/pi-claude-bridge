@@ -93,7 +93,10 @@ describe("a rate-limited failure", () => {
 
 	it("labels only the failure it caused, not a later one", async () => {
 		const c = makeCtx();
-		await consume(c, [rejection, limitResult, errorResult]);
+		await consume(c, [rejection, limitResult]);
+		// The failure ends that query; the context's next query fails on its own.
+		c.resetTurnState(fakeModel);
+		await consume(c, [errorResult]);
 
 		assert.strictEqual(c.turnOutput.errorMessage, errorResult.result);
 	});
