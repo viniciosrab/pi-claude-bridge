@@ -123,8 +123,15 @@ function diagDump(label: string, data: Record<string, unknown>) {
 	const ts = new Date().toISOString();
 	const entry = { ts, moduleInstanceId, label, ...data };
 	const logPath = diagLogPath();
-	mkdirSync(dirname(logPath), { recursive: true });
-	appendFileSync(logPath, JSON.stringify(entry) + "\n");
+	// Diagnostics must never take down what they describe: a caller may be a timer
+	// (the lost tool call watchdog) where a throw escapes uncaught and skips teardown.
+	try {
+		mkdirSync(dirname(logPath), { recursive: true });
+		appendFileSync(logPath, JSON.stringify(entry) + "\n");
+	} catch (error) {
+		debug(`DIAG: ${label} could not be written to ${logPath}:`, error);
+		return;
+	}
 	debug(`DIAG: ${label} (see ${logPath})`);
 }
 

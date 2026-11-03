@@ -11,7 +11,9 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { QueryContext } from "../src/query-state.js";
 import { diagLogPath } from "../src/log-paths.js";
 
@@ -129,6 +131,27 @@ describe("a handler waiting on a tool call pi never received", () => {
 		assert.strictEqual(entry?.toolCallId, "toolu_monitor");
 		assert.strictEqual(entry.toolName, "MonitorCreate");
 		assert.strictEqual(entry.streamOpen, true);
+	});
+
+	// The watchdog runs in a timer callback: a diagnostics write that throws there (a
+	// read-only agent dir, a full disk) would escape uncaught and skip the teardown,
+	// leaving the hang the watchdog exists to end (CodeRabbit on PR #23).
+	it("still ends the turn when the diagnostics log cannot be written", async () => {
+		const blocker = join(mkdtempSync(join(tmpdir(), "diag-blocked-")), "file");
+		writeFileSync(blocker, "");
+		const previous = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = join(blocker, "agent"); // mkdir under a file: ENOTDIR
+		try {
+			const { c, killed, handlers } = makeCtx();
+			const next = fakeStream();
+			c.currentPiStream = next;
+			const monitor = handlers.MonitorCreate("toolu_unlogged");
+			assert.notStrictEqual(await settled(monitor), "pending", "the orphaned handler is released");
+			assert.ok(next.events.some((e) => e.type === "end"), "pi's stream ends");
+			assert.deepStrictEqual(killed, ["interrupt", "close"]);
+		} finally {
+			process.env.PI_CODING_AGENT_DIR = previous;
+		}
 	});
 
 	it("ends the query even when pi is still running the calls it did get", async () => {
