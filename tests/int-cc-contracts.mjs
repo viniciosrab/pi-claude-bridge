@@ -629,10 +629,13 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 			...(resume ? { resume } : {}),
 		});
 		const sysText = (body) => (body.system ?? []).map((b) => b.text ?? "").join("\n");
-		// Filter to our own requests by a preset anchor: if CC ever adds
-		// background side requests, slicing the last two off the raw log could
-		// compare those and pass for the wrong reason.
-		const presetReqs = () => requests.filter((b) => sysText(b).includes("You are a Claude agent, built on Anthropic's Claude Agent SDK"));
+		// Filter to our own turns: the preset anchor, and a last message that is the
+		// user's prompt. CC 2.1.308 also sends a background session-title request
+		// that carries the same preset but ends on a system message; slicing the
+		// last two off the preset matches alone compared that one with a real turn.
+		const lastText = (m) => (Array.isArray(m?.content) ? m.content.at(-1)?.text : m?.content) ?? "";
+		const presetReqs = () => requests.filter((b) => sysText(b).includes("You are a Claude agent, built on Anthropic's Claude Agent SDK")
+			&& b.messages.at(-1)?.role === "user" && lastText(b.messages.at(-1)) === "Reply OK.");
 
 		// Control: default preset carries the git snapshot, and a git transition
 		// moves it — the very break this test's positive side pins away. Grep the
