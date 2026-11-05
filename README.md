@@ -6,6 +6,11 @@ Use Claude (Fable, Opus, Sonnet, Haiku) as a model in [pi](https://github.com/ea
 
 Originally based on [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by Eli Dickinson, itself based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal. This project is developed independently since 0.9.4-fork.13.
 
+<p>
+<a href="assets/claude-bridge1.png"><img src="assets/claude-bridge1.png" width="49%"></a>&nbsp;
+<a href="assets/claude-bridge2.png"><img src="assets/claude-bridge2.png" width="49%"></a>
+</p>
+
 ## Install
 
 ```
@@ -43,16 +48,18 @@ Optional. Global: `~/.pi/agent/claude-bridge.json`. Per project: `.pi/claude-bri
 | `loadClaudeSettings` | `true` | Set `false` to skip Claude Code's `settings.json` hooks and plugins on each turn. That cuts tokens and latency, but it also drops `env` and `apiKeyHelper` from those settings. |
 | `rateLimitWarnings` | `true` | Set `false` to hide the rate-limit warnings and reset-time notices. |
 
-Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 get 1M context on every plan. Newer models start at 200K until the bridge adds them. Fable is not included in Pro without Extra Usage.
+Context window: Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 always run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. Any other model runs at 200K until its 1M context is measured and added to the bridge.
 
-The bridge also removes Claude Code's 2,048-character cap on MCP tool descriptions, which hid codemode's MCP servers from Claude.
+Plan access is separate: on Pro, Fable needs Extra Usage.
+
+pi's tools reach Claude Code as MCP tools, and Claude Code cuts each MCP tool description at 2,048 characters. The bridge lifts that limit, so long descriptions such as codemode's list of MCP servers reach Claude whole.
 
 ## Troubleshooting
 
 - **Every turn fails with an auth error.** Unset any `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` you export: they redirect Claude Code away from your subscription.
 - **A turn is refused because of the system prompt.** Usually another extension changed or replaced pi's system prompt: fix or disable it. If the error points at your own text, reword it.
 - **Updated AGENTS.md or skills are ignored.** The prompt is captured at the start of a session. Start a new session.
-- **A turn costs more after an abort, `/compact` or a branch switch.** The bridge resends the whole conversation, which usually misses the prompt cache. This is expected.
+- **A turn costs more after `/compact` or a branch switch.** pi's history no longer matches Claude Code's session, so the bridge rebuilds it and the next request misses the prompt cache. This is expected. An abort, an API error, `/fork`, `/clone` and reopening a session (`pi --continue`, `/resume`, a new window) keep the cache.
 - **Claude Code hooks add duplicate guidance.** `~/.claude/settings.json` hooks also fire in bridge turns. Have the hook skip them: `[ -n "$PI_CODING_AGENT" ] && exit 0`.
 - **Subagents with @gotgenes/pi-subagents.** Add `{"promptInheritance": {"claude-bridge": "portable"}}` to `~/.pi/agent/subagents.json`.
 
