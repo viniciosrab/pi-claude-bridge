@@ -24,14 +24,13 @@ Tags: `Add`, `Fix`, `Refactor`, `Tests`, `Bump`, `Deprecate`, `Remove`.
 
 ## Release
 
-No build step — the package ships `src` TypeScript as-is (see `files` in `package.json`). To cut version `X.Y.Z`:
+No build step — the package ships `src` TypeScript as-is (see `files` in `package.json`). It is published to npm as `@viniciosrab/pi-claude-bridge` by `.github/workflows/release.yml` (npm trusted publishing), never from a local machine. To cut version `X.Y.Z`:
 
 1. **Changelog** — rename the `## UNRELEASED` section to `## X.Y.Z — YYYY-MM-DD`.
-2. **Bump** — set `version` to `X.Y.Z` in `package.json`.
-3. **Commit** — `git commit -m "Release X.Y.Z"` (changelog + package.json only).
-4. **Tag** — `git tag vX.Y.Z` (note the `v` prefix).
-5. **Push commit and tag together** — `git push --follow-tags`.
-6. **Publish** — `npm login` and `npm publish`.
+2. **Bump** — `npm version X.Y.Z --no-git-tag-version` (updates `package.json` and `package-lock.json`).
+3. **Commit** — `git commit -m "Release X.Y.Z"` (changelog, package.json and package-lock.json only).
+4. **Tag** — `git tag -a vX.Y.Z -m "X.Y.Z"` (annotated, so `--follow-tags` pushes it; note the `v` prefix).
+5. **Push commit and tag together** — `git push --follow-tags`. The tag starts the Release workflow, which checks that the tag matches `package.json`, runs the unit tests and publishes with the `latest` dist-tag.
 
 ## Tests
 
