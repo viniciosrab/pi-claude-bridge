@@ -10,7 +10,7 @@ Behind the scenes, pi's tools are bridged to Claude Code but everything works li
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
-**1M Context:** Fable 5/5.1, Opus 5.5/5/4.8/4.7, and Sonnet 5.5/5 get 1M context. Opus 4.6 gets 1M only on a Max plan or with Extra Usage, and Sonnet 4.6 only with Extra Usage — set `provider.plan` and/or `provider.longContextExtraUsage` as described in [Configuration](#configuration).
+**1M Context:** Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 get 1M context. Opus 4.6 gets 1M only on a Max plan or with Extra Usage, and Sonnet 4.6 only with Extra Usage — set `provider.plan` and/or `provider.longContextExtraUsage` as described in [Configuration](#configuration).
 
 ## AskClaude Tool
 
@@ -128,7 +128,7 @@ Requires the following in `~/.pi/agent/subagents.json`:
 
 ## Known issues
 
-**A session rebuild re-sends the whole conversation.** The bridge rewrites Claude Code's session from pi's history whenever the two diverge — after an abort, `/compact`, tree navigation, an API error, or on returning to a session — and the next request usually misses the prompt cache for everything past the system prompt. Abort-heavy sessions cost noticeably more.
+**A session rebuild re-sends the whole conversation.** The bridge rewrites Claude Code's session from pi's history whenever pi rewrites that history — `/compact`, tree navigation, or an extension that edits past messages — and the next request usually misses the prompt cache for everything past the system prompt. An abort, an API error, `/fork`, `/clone` and reopening a session resume Claude Code's own session file instead, and keep the cache (see `CHANGELOG.md`).
 
 **Files Claude Code edits are not carried across a rebuild.** The edit itself survives in the history as a tool call and result — what's lost is the post-edit file snapshot. `@file` expansions *are* carried.
 
