@@ -39,7 +39,7 @@ import type { McpResult } from "./extract-tool-results.js";
 // silently pairing results to the wrong call, which is the intended tradeoff.
 const TOOL_USE_ID_META = "claudecode/toolUseId";
 
-interface McpToolDef {
+export interface McpToolDef {
 	name: string;
 	description: string;
 	inputSchema: unknown;

@@ -58,25 +58,28 @@ describe("placeCarriedAttachments", () => {
 	const carried = [{ attachment: { type: "file", filename: "/a.js" }, userOrdinal: 1, parentText: "review @a.js" }];
 
 	it("resolves the ordinal to an index in the array being imported", () => {
-		const attachments = placeCarriedAttachments(carried, [
+		const { attachments, skipped } = placeCarriedAttachments(carried, [
 			{ role: "user", content: "first" },
 			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
 			{ role: "user", content: [{ type: "text", text: "review @a.js" }] },
 		]);
+		assert.equal(skipped.length, 0);
 		assert.deepEqual(attachments, [{ afterIndex: 2, attachment: carried[0].attachment }]);
 	});
 
 	it("drops it when that prompt changed rather than guessing", () => {
-		const attachments = placeCarriedAttachments(carried, [
+		const { attachments, skipped } = placeCarriedAttachments(carried, [
 			{ role: "user", content: "first" },
 			{ role: "user", content: "something else entirely" },
 		]);
-		assert.deepEqual(attachments, []);
+		assert.equal(attachments.length, 0);
+		assert.match(skipped[0], /changed/);
 	});
 
 	it("drops it when history no longer reaches that prompt", () => {
-		const attachments = placeCarriedAttachments(carried, [{ role: "user", content: "first" }]);
-		assert.deepEqual(attachments, []);
+		const { attachments, skipped } = placeCarriedAttachments(carried, [{ role: "user", content: "first" }]);
+		assert.equal(attachments.length, 0);
+		assert.match(skipped[0], /no longer in history/);
 	});
 });
 

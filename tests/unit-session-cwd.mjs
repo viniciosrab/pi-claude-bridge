@@ -45,6 +45,7 @@ describe("streamSimple", () => {
 		activate({
 			on: (name, fn) => { (handlers[name] ??= []).push(fn); },
 			registerProvider: (_name, config) => { providerConfig = config; },
+			registerTool: () => {},
 		});
 		for (const fn of handlers.session_start) fn({}, { cwd: sessionCwd, sessionManager: { getSessionId: () => "s-web" } });
 		t.after(() => forgetSessionCwd("s-web"));
@@ -53,7 +54,7 @@ describe("streamSimple", () => {
 		__test.setQuery(({ options }) => {
 			queryCwd = options.cwd;
 			const gen = (async function* () {
-				yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
+				yield { type: "system", subtype: "init", session_id: "cc-web" };
 				yield { type: "result", subtype: "success", is_error: false, result: "ok" };
 			})();
 			gen.interrupt = async () => {};

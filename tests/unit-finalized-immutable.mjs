@@ -17,6 +17,7 @@ let providerConfig;
 mod.default({
 	on: () => {},
 	registerProvider: (_name, config) => { providerConfig = config; },
+	registerTool: () => {},
 });
 const streamSimple = providerConfig.streamSimple;
 const model = providerConfig.models[0];
@@ -52,11 +53,11 @@ function parkingQuery(steps, after = async function* () {}) {
 	let park, settle;
 	parked = new Promise((r) => { park = r; });
 	settled = new Promise((r) => { settle = r; });
-	setQuery(({ prompt, options }) => {
+	setQuery(({ prompt }) => {
 		const gate = new Promise((r) => { release = r; });
 		const gen = (async function* () {
 			await prompt[Symbol.asyncIterator]().next();
-			yield { type: "system", subtype: "init", session_id: options.sessionId ?? options.resume };
+			yield { type: "system", subtype: "init", session_id: "cc-finalized" };
 			yield* steps;
 			park();
 			await gate;
@@ -127,25 +128,44 @@ describe("a turn still streaming", () => {
 	}
 });
 
-it("does not publish an imported mirror before any complete assistant progress", async () => {
-	const messages = [
-		{ role: "user", content: "previous prompt", timestamp: 1 },
-		{
-			role: "assistant", content: [{ type: "text", text: "previous answer" }],
-			api: model.api, provider: model.provider, model: model.id, stopReason: "stop",
-			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			timestamp: 2,
-		},
-		{ role: "user", content: "go", timestamp: 3 },
-	];
-	const { stream, piSessionId } = run(textStart, lateFailures["an error result"], messages);
+const priorTurn = [
+	{ role: "user", content: "previous prompt", timestamp: 1 },
+	{
+		role: "assistant", content: [{ type: "text", text: "previous answer" }],
+		api: model.api, provider: model.provider, model: model.id, stopReason: "stop",
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		timestamp: 2,
+	},
+	{ role: "user", content: "go", timestamp: 3 },
+];
+
+it("drops the session mirror at an error result, so a queued steer is rebuilt", async () => {
+	const { stream, piSessionId } = run(textStart, lateFailures["an error result"], priorTurn);
 	await parked;
-	assert.equal(getSharedSession(piSessionId), null, "import seed stays query-local until assistant progress");
+	assert.ok(getSharedSession(piSessionId), "prior history created a mirror before the query failed");
+	// A steer written to CC's stdin and not yet replayed when the error result lands.
+	for (const c of activeQueryContexts) if (c.piSessionId === piSessionId) c.pendingSteerUuids.add("steer");
 
 	release();
 	await stream.result();
 	await settled;
 
 	assert.equal(getSharedSession(piSessionId), null);
+});
+
+// fork: error resume (upstream #103). With no steer pending, CC's file holds the whole
+// failed turn, so the session is kept with an error mark and the next turn resumes it.
+it("marks the session for resume at an error result with no steer pending", async () => {
+	const { stream, piSessionId } = run(textStart, lateFailures["an error result"], priorTurn);
+	await parked;
+
+	release();
+	await stream.result();
+	await settled;
+
+	const state = getSharedSession(piSessionId);
+	assert.equal(state?.sessionId, "cc-finalized");
+	assert.equal(state.errorResult, true);
+	assert.equal(state.cursor, 3, "the cursor covers the failed prompt");
 });

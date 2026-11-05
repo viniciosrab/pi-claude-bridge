@@ -21,7 +21,7 @@ describe("prompt guard", () => {
 		const found = captures.resolve("leaking prompt");
 		assert.ok(found);
 
-		assert.throws(() => projectPromptCapture(found, { hasReadTool: false }), (error) => {
+		assert.throws(() => projectPromptCapture(found, { skillReadTool: "none" }), (error) => {
 			assert.ok(error instanceof Error);
 			assert.ok(error.message.includes(PI_PREAMBLE));
 			assert.match(error.message, /offset 0 of \d+ chars/);
@@ -42,7 +42,7 @@ describe("prompt guard", () => {
 		assert.ok(child);
 		assert.equal(child.inherited.length, 1);
 
-		const projected = projectPromptCapture(child, { hasReadTool: false });
+		const projected = projectPromptCapture(child, { skillReadTool: "none" });
 		assert.ok(projected);
 		assert.ok(!projected.includes(PI_PREAMBLE));
 		assert.match(projected, /child wrapper/);
@@ -59,7 +59,7 @@ describe("prompt guard", () => {
 		assert.ok(found);
 
 		assert.throws(
-			() => projectPromptCapture(found, { hasReadTool: false }),
+			() => projectPromptCapture(found, { skillReadTool: "none" }),
 			(error) => {
 				assert.match(error.message, /docs\/custom-provider\.md and docs\/packages\.md in the project context block/);
 				return true;
@@ -73,7 +73,7 @@ describe("prompt guard", () => {
 			const custom = `see ${path}`;
 			captures.record("one path", capture({ custom }), "before_agent_start");
 
-			assert.equal(projectPromptCapture(captures.resolve("one path"), { hasReadTool: false }), custom);
+			assert.equal(projectPromptCapture(captures.resolve("one path"), { skillReadTool: "none" }), custom);
 		}
 	});
 
@@ -84,7 +84,7 @@ describe("prompt guard", () => {
 		const found = captures.resolve("mid-line prompt");
 		assert.ok(found);
 
-		assert.equal(projectPromptCapture(found, { hasReadTool: false }), custom);
+		assert.equal(projectPromptCapture(found, { skillReadTool: "none" }), custom);
 	});
 
 	it("pins the guard's marker in pi's own rendered system prompt", async () => {

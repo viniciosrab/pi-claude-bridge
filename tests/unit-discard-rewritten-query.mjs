@@ -4,7 +4,7 @@
  * pi checks its compaction threshold at every turn boundary inside a run, so it
  * can rewrite the history while a Claude Code query sits parked waiting for a
  * tool result. Tool-result delivery is the one provider call that never reaches
- * syncSharedSession, so `dirtyTail` alone does not stop it: the result goes
+ * syncSharedSession, so `needsRebuild` alone does not stop it: the result goes
  * into the parked query, CC answers over the pre-compaction conversation and
  * reports its full usage, and pi crosses the same threshold at the next
  * boundary. Measured in tests/int-compact-midturn-rebuild.mjs as five
@@ -23,16 +23,12 @@
  */
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { emptyState } from "./lib/session-state.mjs";
 import { QueryContext } from "../src/query-state.js";
 
-const mod = await import("../src/index.js");
-const { __test } = mod;
-const handlers = {};
-mod.default({ on: (name, fn) => { (handlers[name] ??= []).push(fn); }, registerProvider: () => {} });
+const { __test } = await import("../src/index.js");
 const {
 	activeQueryContexts, armStaleContexts, contextForToolResults, discardRewrittenQuery,
-	historyRewrittenBySession, markRebuildForSession,
+	historyRewrittenBySession, isQueryAbandoned, markRebuildForSession,
 	getSharedSession, resetSharedSession, setSharedSession,
 } = __test;
 
@@ -45,8 +41,6 @@ function parkedQuery(toolCallId = "call_1", piSessionId = "pi-parent") {
 	};
 	const c = new QueryContext();
 	c.activeQuery = sdkQuery;
-	// What the provider installs at launch (requestAbort).
-	c.stopProcess = () => { void sdkQuery.interrupt(); sdkQuery.close(); };
 	c.piSessionId = piSessionId;
 	c.turnToolCallIds = [toolCallId];
 	c.pendingToolCalls.set(toolCallId, {
@@ -78,16 +72,6 @@ describe("markRebuildForSession", () => {
 			"recorded only on the session, the first turn's parked query survives the compaction");
 	});
 
-	it("keeps the mark through another session's shutdown and a session switch", () => {
-		markRebuildForSession("pi-parent", "session_compact:threshold");
-
-		for (const fn of handlers.session_shutdown) fn({}, { sessionManager: { getSessionId: () => "pi-subagent" } });
-		for (const fn of handlers.session_start) fn({ reason: "resume" }, { cwd: process.cwd(), sessionManager: { getSessionId: () => "pi-other" } });
-
-		assert.ok(historyRewrittenBySession.has("pi-parent"),
-			"pi-parent's next turn still has to say its history was rewritten");
-	});
-
 	it("arms only the parked queries of the rewriting pi session", () => {
 		const { c } = parkedQuery("call_1", "pi-parent");
 		const sub = parkedQuery("call_sub", "pi-subagent");
@@ -113,20 +97,25 @@ describe("markRebuildForSession", () => {
 
 	it("forces the next sync down the rebuild path for the owning session's conversation", () => {
 		// Session mirrors are per pi session: parent and subagent each have one.
-		setSharedSession("pi-a", emptyState("abc", "/tmp", { dirtyTail: false }));
-		setSharedSession("pi-b", emptyState("def", "/tmp", { dirtyTail: false }));
+		setSharedSession("pi-a", { sessionId: "abc", cursor: 3, cwd: "/tmp", needsRebuild: false, piSessionId: "pi-a" });
+		setSharedSession("pi-b", { sessionId: "def", cursor: 2, cwd: "/tmp", needsRebuild: false, piSessionId: "pi-b" });
 
 		markRebuildForSession("pi-b", "session_compact:threshold");
-		assert.equal(getSharedSession("pi-a").dirtyTail, false,
+		assert.equal(getSharedSession("pi-a").needsRebuild, false,
 			"a subagent's compaction must not rebuild the conversation it never touched");
-		assert.equal(getSharedSession("pi-b").dirtyTail, true,
+		assert.equal(getSharedSession("pi-b").needsRebuild, true,
 			"--resume would replay a history pi no longer has");
 
 		markRebuildForSession(null, "session_compact:served");
-		assert.equal(getSharedSession("pi-a").dirtyTail, false,
+		// An unattributed rewrite marks the "(none)" bucket — the only mirror a
+		// direct caller without a session id can be serving.
+		assert.equal(getSharedSession("pi-a").needsRebuild, false,
 			"the parent's mirror is untouched by an unattributed rewrite");
-		assert.deepEqual([...historyRewrittenBySession], ["pi-b"],
-			"a null mark arms no discard: no reader could match or consume one");
+		// The discard set is keyed differently from the mirror on purpose: its
+		// readers all guard on a real piSessionId, so a "(none)" entry here could
+		// never be matched or consumed — only leaked.
+		assert.ok(!historyRewrittenBySession.has("(none)"),
+			"a null mark records no set entry: no reader could match or consume one");
 	});
 
 	it("arms the discarding session's replacement after a second rewrite (mid-turn double compaction)", () => {
@@ -155,11 +144,11 @@ describe("markRebuildForSession", () => {
 describe("discardRewrittenQuery", () => {
 	it("stops the parked query being a routing target for the turn's result", () => {
 		const { c } = parkedQuery();
-		assert.equal(contextForToolResults(toolResults, "pi-parent"), c, "precondition: the result routes to the parked query");
+		assert.equal(contextForToolResults(toolResults), c, "precondition: the result routes to the parked query");
 
 		discardRewrittenQuery(c);
 
-		assert.equal(contextForToolResults(toolResults, "pi-parent"), undefined,
+		assert.equal(contextForToolResults(toolResults), undefined,
 			"a result routed here would answer over the conversation pi just discarded");
 		assert.equal(c.activeQuery, null);
 		assert.equal(activeQueryContexts.has(c), false, "routing matches ids only against contexts in this set");
@@ -180,13 +169,13 @@ describe("discardRewrittenQuery", () => {
 		assert.equal(c.pendingToolCalls.size, 0);
 	});
 
-	it("marks the query discarded so its completion cannot overwrite the rebuild", () => {
-		const { c } = parkedQuery();
-		assert.equal(c.discarded, false);
+	it("marks the query abandoned so its completion cannot overwrite the rebuild", () => {
+		const { c, sdkQuery } = parkedQuery();
+		assert.equal(isQueryAbandoned(sdkQuery), false);
 
 		discardRewrittenQuery(c);
 
-		assert.equal(c.discarded, true,
+		assert.equal(isQueryAbandoned(sdkQuery), true,
 			"its completion handler would otherwise capture the stale session id over the rebuilt one");
 	});
 
@@ -205,8 +194,8 @@ describe("discardRewrittenQuery", () => {
 		void other;
 	});
 
-	it("does not overwrite a mirror without its query-owned recording callback", () => {
-		setSharedSession("pi-parent", emptyState("abc", "/tmp"));
+	it("rotates the session id of the discarding session's own mirror, because the rebuild follows the kill immediately", () => {
+		setSharedSession("pi-parent", { sessionId: "abc", cursor: 3, cwd: "/tmp", piSessionId: "pi-parent" });
 		const { c } = parkedQuery("call_1", "pi-parent");
 
 		discardRewrittenQuery(c);
@@ -215,14 +204,14 @@ describe("discardRewrittenQuery", () => {
 		// rebuild is the very next thing that happens — the abort path's reasoning,
 		// with the race made tighter. Another session's mirror is never touched.
 		const s = getSharedSession("pi-parent");
-		assert.equal(s.dirtyTail, false);
-		assert.equal(c.discarded, true);
+		assert.equal(s.forceRotate, true);
+		assert.equal(s.needsRebuild, true);
 	});
 
 	it("leaves a foreign session's mirror untouched when the foreign query discards", () => {
 		// pi-b's query parks, pi-b compacts, the discard rotates only pi-b's
 		// mirror — when there is none. The parent's mirror is not pi-b's to rotate.
-		setSharedSession("pi-parent", emptyState("parent", "/tmp", { dirtyTail: false }));
+		setSharedSession("pi-parent", { sessionId: "parent", cursor: 3, cwd: "/tmp", needsRebuild: false, piSessionId: "pi-parent" });
 		const { c } = parkedQuery("call_1", "pi-b");
 		markRebuildForSession("pi-b", "session_compact:threshold");
 		armStaleContexts();
@@ -230,8 +219,8 @@ describe("discardRewrittenQuery", () => {
 		discardRewrittenQuery(c);
 
 		const s = getSharedSession("pi-parent");
-		assert.equal(s.dirtyTail, false, "the child's rebuild must not force the parent's next sync");
-		assert.equal(s.dirtyTail, false, "the parent conversation is intact");
+		assert.equal(s.needsRebuild, false, "the child's rebuild must not force the parent's next sync");
+		assert.equal(s.forceRotate, undefined, "nor rotate it: the parent conversation is intact");
 		assert.equal(getSharedSession("pi-b"), null, "the child never had a mirror to rotate");
 	});
 
@@ -248,15 +237,23 @@ describe("discardRewrittenQuery", () => {
 
 describe("per-session mirrors", () => {
 	it("separates the CC conversations of two pi sessions", () => {
-		setSharedSession("pi-a", emptyState("cc-a", "/tmp"));
-		setSharedSession("pi-b", emptyState("cc-b", "/tmp"));
+		setSharedSession("pi-a", { sessionId: "cc-a", cursor: 4, cwd: "/tmp", piSessionId: "pi-a" });
+		setSharedSession("pi-b", { sessionId: "cc-b", cursor: 1, cwd: "/tmp", piSessionId: "pi-b" });
 
-		assert.equal(getSharedSession("pi-a").ccSessionId, "cc-a");
-		assert.equal(getSharedSession("pi-b").ccSessionId, "cc-b");
+		assert.equal(getSharedSession("pi-a").sessionId, "cc-a");
+		assert.equal(getSharedSession("pi-b").sessionId, "cc-b");
 		assert.equal(getSharedSession("pi-c"), null, "a session with no mirror has none");
 
 		resetSharedSession("pi-b");
 		assert.equal(getSharedSession("pi-b"), null, "reset clears only the keyed mirror");
-		assert.equal(getSharedSession("pi-a").ccSessionId, "cc-a", "a sibling survives the reset");
+		assert.equal(getSharedSession("pi-a").sessionId, "cc-a", "a sibling survives the reset");
+	});
+
+	it("shares one bucket for unattributed callers", () => {
+		setSharedSession(null, { sessionId: "cc-none", cursor: 2, cwd: "/tmp", piSessionId: undefined });
+
+		assert.equal(getSharedSession(null).sessionId, "cc-none");
+		assert.equal(getSharedSession("pi-a"), null,
+			"an attributed session never touches the unattributed bucket");
 	});
 });

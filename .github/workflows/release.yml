@@ -1,0 +1,57 @@
+# Publish @viniciosrab/pi-claude-bridge to npm when a `vX.Y.Z` tag is pushed.
+# Uses npm trusted publishing (OIDC): the npm package must list this repository and
+# `release.yml` as its trusted publisher.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Check the tag matches package.json
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run test:unit
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$(npm --version)"; then
+            npm install -g npm@11
+          fi
+          npm --version
+
+      - run: npm publish --access public --tag latest

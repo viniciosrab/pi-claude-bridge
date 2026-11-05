@@ -5,7 +5,7 @@
 // (turn boundary).
 // Extracted from index.ts so tests can import without activating the extension.
 
-type McpContent = Array<
+export type McpContent = Array<
 	| { type: "text"; text: string }
 	| { type: "image"; data: string; mimeType: string }
 >;
@@ -17,7 +17,7 @@ export interface McpResult {
 	[key: string]: unknown;
 }
 
-function toolResultToMcpContent(
+export function toolResultToMcpContent(
 	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 ): McpContent {
 	if (typeof content === "string") return [{ type: "text", text: content || "" }];
@@ -30,16 +30,18 @@ function toolResultToMcpContent(
 	return blocks.length ? blocks : [{ type: "text", text: "" }];
 }
 
+// Returns { results, stopIdx } so callers can log the walk boundary.
 export function extractAllToolResults(
 	messages: Array<{ role: string; content?: unknown; toolCallId?: string; isError?: boolean; [key: string]: unknown }>,
-): McpResult[] {
+): { results: McpResult[]; stopIdx: number } {
 	const results: McpResult[] = [];
+	let stopIdx = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "toolResult") {
 			results.unshift({ content: toolResultToMcpContent(msg.content as string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>), isError: msg.isError, toolCallId: msg.toolCallId });
-		} else if (msg.role === "assistant") break;
+		} else if (msg.role === "assistant") { stopIdx = i; break; }
 		// user messages: skip (steer/followUp injected mid-tool-execution)
 	}
-	return results;
+	return { results, stopIdx };
 }
