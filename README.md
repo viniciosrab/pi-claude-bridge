@@ -4,12 +4,13 @@
 
 Use Claude (Fable, Opus, Sonnet, Haiku) as a model in [pi](https://github.com/earendil-works/pi), through your Claude Code subscription. Every tool call runs in pi's TUI, as with any other model.
 
-Originally based on [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by Eli Dickinson, itself based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal. This project is developed independently since 0.9.4-fork.13.
+What it does for you:
 
-<p>
-<a href="assets/claude-bridge1.png"><img src="assets/claude-bridge1.png" width="49%"></a>&nbsp;
-<a href="assets/claude-bridge2.png"><img src="assets/claude-bridge2.png" width="49%"></a>
-</p>
+- **Your Claude plan, pi's tools.** Claude Code does the talking to Anthropic; pi runs every tool, skill and extension as usual.
+- **The prompt cache survives the usual interruptions.** An abort, an API error, `/fork`, `/clone`, or reopening a session in a new window continue Claude Code's own session instead of re-sending the whole conversation.
+- **Turns that don't hang.** A tool call lost between Claude Code and pi, or parallel calls after a non-streaming fallback, end the turn with a clear error instead of leaving it on "Working".
+- **Full tool descriptions.** Claude Code cuts each MCP tool description at 2,048 characters; the bridge lifts that limit, so long descriptions such as codemode's list of MCP servers reach Claude whole.
+- **New models without a bridge release.** Claude models pi knows about appear in `/model` after `pi update`.
 
 ## Install
 
@@ -52,8 +53,6 @@ Context window: Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 alwa
 
 Plan access is separate: on Pro, Fable needs Extra Usage.
 
-pi's tools reach Claude Code as MCP tools, and Claude Code cuts each MCP tool description at 2,048 characters. The bridge lifts that limit, so long descriptions such as codemode's list of MCP servers reach Claude whole.
-
 ## Troubleshooting
 
 - **Every turn fails with an auth error.** Unset any `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` you export: they redirect Claude Code away from your subscription.
@@ -66,3 +65,7 @@ pi's tools reach Claude Code as MCP tools, and Claude Code cuts each MCP tool de
 For bug reports, set `CLAUDE_BRIDGE_DEBUG=1` and attach `~/.pi/agent/claude-bridge.log` plus the matching file in `~/.pi/agent/cc-cli-logs/` to a [new issue](https://github.com/viniciosrab/pi-claude-bridge/issues/new).
 
 Extension authors and contributors: see the [reference](docs/reference.md).
+
+## Credits
+
+This project started from [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by Eli Dickinson, itself based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal. It has been developed on its own since 0.9.4-fork.13. Thank you both.
