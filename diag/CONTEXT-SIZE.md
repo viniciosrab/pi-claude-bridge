@@ -65,6 +65,8 @@ the footnote below the table).
 | `claude-opus-4-6[1m]`    | 429              | 1M              | 1M               | 1M              |
 | `claude-fable-5`          | 429§             | 1M              | —                | —               |
 | `claude-fable-5[1m]`     | 429§             | 1M              | —                | —               |
+| `claude-fable-5-2`        | 200K¶            | —               | —                | —               |
+| `claude-fable-5-2[1m]`   | 1M¶              | —               | —                | —               |
 | `claude-sonnet-5`         | 1M§              | 1M              | —                | —               |
 | `claude-sonnet-5[1m]`    | 1M               | 1M              | —                | —               |
 | `claude-sonnet-4-6`       | 200K             | 200K            | 200K             | 200K            |
@@ -106,6 +108,13 @@ serving (bare 200K, `[1m]` 1M in June) to rejecting both variants with 429
 one, and no fable id serves that condition at all. `sonnet-5` and `opus-4-8`
 bare rose 200K → 1M. `fable-5-1` was not re-probed and is assumed to share
 fable-5's gate.
+
+¶ **Measured 2026-11-09 (Pro credits off, SDK 0.3.308 / Claude Code 2.1.308),
+the day Fable 5.2 shipped.** Unlike `fable-5`, it answered without usage
+credits: bare served 200K and `[1m]` 1M, both with 32K max output, the
+default Claude Code 2.1.308 applies to a model it does not know. The same probe
+against a Claude Code 2.1.321 binary (`pathToClaudeCodeExecutable`) served 1M
+from both ids, with 128K max output.
 
 ## Error shapes
 
