@@ -196,21 +196,24 @@ try {
   if (!lower8.includes(WORD_B)) throw new Error(`Turn 8 response missing '${WORD_B}': ${text8}`);
   if (!lower8.includes(WORD_C)) throw new Error(`Turn 8 response missing '${WORD_C}': ${text8}`);
 
-  // sessionId stability: one Claude Code session serves the whole test. Normal
-  // rebuilds (Case 2 → Case 4) keep its id, and after an abort (Turn 7) the bridge
-  // resumes the session the killed CLI finished instead of rebuilding a new one,
-  // so the next request keeps the prompt cache (see resumeAfterAbort in src/index.ts).
+  // sessionId stability: normal rebuilds (Case 2 → Case 4) keep the session id. After
+  // the abort (Turn 7) the bridge recovers one of two ways (postAbortSync in src/fork.ts):
+  // it resumes the session the killed CLI finished, keeping the prompt cache, or, when
+  // the abort landed before Claude Code saved the prompt, it rebuilds on a fresh id.
+  // Either is correct; exactly one of them must happen, and only a rebuild adds an id.
   const debugLog = readFileSync(DEBUG_LOG, "utf8");
   const sessionIds = new Set();
-  let resumedPostAbort = 0;
+  let resumed = 0;
+  let rotated = 0;
   for (const match of debugLog.matchAll(/syncResult: path=(reuse|rebuild) sessionId=([a-f0-9-]+)([^\n]*)/g)) {
     sessionIds.add(match[2]);
-    if (match[1] === "reuse" && / post-abort$/.test(match[3])) resumedPostAbort++;
+    if (match[1] === "reuse" && / post-abort$/.test(match[3])) resumed++;
+    if (match[1] === "rebuild" && / rotated-post-abort$/.test(match[3])) rotated++;
   }
   if (sessionIds.size === 0) throw new Error("no syncResult markers found in debug log");
-  if (sessionIds.size !== 1) throw new Error(`expected 1 sessionId for the whole test, got ${sessionIds.size}: ${[...sessionIds].join(", ")}`);
-  if (resumedPostAbort !== 1) throw new Error(`expected exactly 1 post-abort resume, got ${resumedPostAbort}`);
-  console.log(`  sessionIds observed: 1, resumed once after the abort`);
+  if (resumed + rotated !== 1) throw new Error(`expected exactly 1 post-abort recovery, got ${resumed} resumes and ${rotated} rebuilds`);
+  if (sessionIds.size !== 1 + rotated) throw new Error(`expected ${1 + rotated} sessionIds, got ${sessionIds.size}: ${[...sessionIds].join(", ")}`);
+  console.log(`  sessionIds observed: ${sessionIds.size}, recovered after the abort by ${resumed ? "resuming" : "rebuilding"}`);
 
   console.log("PASS");
 } catch (e) {
