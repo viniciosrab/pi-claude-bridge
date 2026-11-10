@@ -96,6 +96,26 @@ describe("non-streaming fallback after a stalled stream", () => {
 		assert.strictEqual(c.turnOutput.stopReason, "toolUse");
 	});
 
+	// A turn whose answer came only as an assistant message (a fallback before any stream
+	// event) must not get the result's copy of the same text on top.
+	it("shows the text once when it arrived as an assistant message before the result", async () => {
+		const c = makeCtx();
+		await consume(c, [
+			{ type: "assistant", message: { id: "msg_1", content: [{ type: "text", text: "hello" }] } },
+			{ type: "result", subtype: "success", is_error: false, result: "hello" },
+		]);
+
+		assert.deepEqual(c.turnOutput.content.map((b) => b.text), ["hello"]);
+		assert.equal(c.currentPiStream.events.filter((e) => e.type === "text_start").length, 1);
+	});
+
+	it("still adds the result text when nothing else delivered it", async () => {
+		const c = makeCtx();
+		await consume(c, [{ type: "result", subtype: "success", is_error: false, result: "only here" }]);
+
+		assert.deepEqual(c.turnOutput.content.map((b) => b.text), ["only here"]);
+	});
+
 	it("still skips the assistant message that repeats a completed stream", async () => {
 		const c = makeCtx();
 		await consume(c, [
