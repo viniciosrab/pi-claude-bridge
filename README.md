@@ -7,8 +7,8 @@ Use Claude (Fable, Opus, Sonnet, Haiku) as a model in [pi](https://github.com/ea
 What it does for you:
 
 - **Your Claude plan, pi's tools.** Claude Code does the talking to Anthropic; pi runs every tool, skill and extension as usual.
-- **The prompt cache survives the usual interruptions.** An abort, an API error, `/fork`, `/clone`, or reopening a session in a new window continue Claude Code's own session instead of re-sending the whole conversation.
-- **New models without a bridge release.** Claude models pi knows about appear in `/model` after `pi update`.
+- **The prompt cache survives the usual interruptions.** An abort, an API error, `/fork`, `/clone`, or reopening a session in a new window usually continue Claude Code's own session instead of re-sending the whole conversation.
+- **New models without a bridge release.** Claude models pi knows about appear in `/model` after `pi update`, at 200K context until a bridge release adds their 1M.
 
 ## Install
 
@@ -20,16 +20,16 @@ Requires pi 0.86.1 or newer and a Claude Code login: install [Claude Code](https
 
 ## Use
 
-Pick a model with `/model`, e.g. `claude-bridge/claude-opus-5` or `claude-bridge/claude-haiku-4-5`. New Claude models appear on their own after `pi update`.
+Pick a model with `/model`, e.g. `claude-bridge/claude-opus-5-5` or `claude-bridge/claude-haiku-5-5`. New Claude models appear on their own after `pi update`.
 
-Skills, AGENTS.md/CLAUDE.md and steering work as usual.
+Skills, AGENTS.md/CLAUDE.md and steering work as usual. pi supplies the instructions, so Claude Code's own `~/.claude/CLAUDE.md`, `.claude/rules/` and output style do not apply.
 
 ## What to expect
 
 - **Usage counts against your Claude plan**, the same as Claude Code.
-- **pi runs the tools, not Claude Code.** Claude Code's own tools and the MCP servers from `~/.claude.json` and `.mcp.json` are not used; Claude sees pi's tools, skills and extensions.
+- **pi runs the tools, not Claude Code.** Claude Code's own tools are not used, nor, by default, the MCP servers from `~/.claude.json` and `.mcp.json` (see `strictMcpConfig`); claude.ai's cloud MCP servers are always off. Claude sees pi's tools, skills and extensions.
 - **`/compact`, tree navigation or an extension that edits past messages makes the next turn cost more.** pi's history no longer matches Claude Code's session, so the bridge rebuilds it and the next request misses the prompt cache.
-- **AGENTS.md and skills are read at the start of a session.** Start a new session for a change to take effect.
+- **AGENTS.md and skills are read at the start of a session.** A change takes effect in a new session, or after a rebuild such as `/compact`.
 
 ## Configure
 
@@ -56,7 +56,7 @@ Optional. Global: `~/.pi/agent/claude-bridge.json`, or the file the `CLAUDE_BRID
 
 Context window: the current models (Fable 5 and newer, Opus 4.7 and newer, Sonnet 5 and newer, Haiku 5.5) run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. A model released after your bridge version runs at 200K until a bridge release adds its 1M context.
 
-Plan access is separate: on Pro, Fable 5 and 5.1 need Extra Usage; Fable 5.2 answered without it when last measured (2026-11-09).
+Plan access is separate: on Pro, Fable 5 needs Extra Usage (5.1 is assumed the same, not measured); Fable 5.2 answered without it when last measured (2026-11-09).
 
 ## Troubleshooting
 

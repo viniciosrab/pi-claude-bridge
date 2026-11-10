@@ -4,7 +4,7 @@ Details for extension authors and contributors. For installing and configuring t
 
 ## Provider
 
-Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
+Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-2`, `claude-bridge/claude-opus-5-5`, or `claude-bridge/claude-haiku-5-5`.
 
 Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary. Claude Code cuts each MCP tool description at 2,048 characters; the bridge lifts that limit, so long descriptions reach Claude whole. A tool call lost between Claude Code and pi ends the turn with an error naming the tool instead of leaving it on "Working".
 
