@@ -57,8 +57,10 @@ export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMem
 	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
 }
 
+// CLAUDE_BRIDGE_CONFIG names another file to use as the global config, so a test or a
+// wrapper script can supply one without replacing pi's agent dir (and its login).
 export function globalConfigPath(): string {
-	return join(getAgentDir(), "claude-bridge.json");
+	return process.env.CLAUDE_BRIDGE_CONFIG || join(getAgentDir(), "claude-bridge.json");
 }
 
 /** Record today's date in the global config so the startup notice shows once, preserving every

@@ -13,7 +13,7 @@
 
 console.log("=== session-resume-test.mjs ===");
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRpcHarness, requireEnv } from "./lib/rpc-harness.mjs";
@@ -38,14 +38,16 @@ const CODE = `code${Math.random().toString(36).slice(2, 6)}`;
 
 const TEST_CWD_PREFIX = join(tmpdir(), "pi-claude-bridge-session-resume-");
 const TEST_CWD = mkdtempSync(TEST_CWD_PREFIX);
-mkdirSync(join(TEST_CWD, ".pi"));
-writeFileSync(join(TEST_CWD, ".pi", "claude-bridge.json"), '{"askClaude":{"enabled":true}}\n');
+// AskClaude is read from the global config only; supply one without replacing pi's agent dir.
+const BRIDGE_CONFIG = join(TEST_CWD, "claude-bridge.json");
+writeFileSync(BRIDGE_CONFIG, '{"askClaude":{"enabled":true}}\n');
 
 // Use harness but with custom args - start on non-provider model
 const harness = createRpcHarness({
 	name: "session-resume",
 	args: ["--model", `${OTHER_PROVIDER}/${OTHER_MODEL}`],
 	cwd: TEST_CWD,
+	env: { CLAUDE_BRIDGE_CONFIG: BRIDGE_CONFIG },
 	defaultTimeout: TIMEOUT,
 });
 

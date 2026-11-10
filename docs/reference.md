@@ -18,7 +18,7 @@ The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai
 
 ## Configuration
 
-Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in a project's `.pi/claude-bridge.json` are ignored, so a cloned repository cannot change them.
+Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in a project's `.pi/claude-bridge.json` are ignored, so a cloned repository cannot change them. Set `CLAUDE_BRIDGE_CONFIG` to a file path to use that file as the global config instead.
 
 ```json
 {

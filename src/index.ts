@@ -933,8 +933,13 @@ let queryImpl: typeof query = query;
 queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
 if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 
+// AskClaude's query(), or a test double (see setAskClaudeQuery).
+let askClaudeQueryImpl: typeof query = query;
+
 // @internal
 export const __test = {
+	setAskClaudeQuery(fn: typeof query | null) { askClaudeQueryImpl = fn ?? query; },
+	promptAndWait: (...args: Parameters<typeof promptAndWait>) => promptAndWait(...args),
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
 		queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
@@ -2657,7 +2662,7 @@ async function promptAndWait(
 	// removes the Skill tool and the listing with it — but AskClaude runs on CC's native
 	// tools, so it has to be asked for. Pi-side skills still arrive via skillsBlock below,
 	// which is meant to be the only channel.
-	const sdkQuery = query({
+	const sdkQuery = askClaudeQueryImpl({
 		prompt,
 		options: {
 			cwd,
