@@ -250,6 +250,30 @@ describe("MCP tool schema with top-level combinators", () => {
 		assert.deepStrictEqual(listed.properties.mode, { type: "string", const: "outline" });
 	});
 
+	it("rejects a rootless schema when any root combinator has a non-object branch", () => {
+		assert.throws(
+			() => createToolServer("custom-tools", [{
+				name: "mixed_tool",
+				description: "",
+				inputSchema: { anyOf: [{ type: "object", properties: {} }], oneOf: [{ type: "string" }] },
+				handler: async () => ({ content: [] }),
+			}]),
+			/mixed_tool: MCP tool parameters must be an object schema/,
+		);
+	});
+
+	it("keeps an allOf declaration, which applies to every call, over anyOf alternatives", async () => {
+		const { inputSchema: listed } = await listTool({
+			type: "object",
+			anyOf: [
+				{ type: "object", properties: { mode: { type: "string", enum: ["a", "b"] } } },
+				{ type: "object", properties: { mode: { type: "string", enum: ["c"] } } },
+			],
+			allOf: [{ type: "object", properties: { mode: { type: "string", enum: ["a"] } } }],
+		});
+		assert.deepStrictEqual(listed.properties.mode, { type: "string", enum: ["a"] });
+	});
+
 	it("rejects a rootless union with a non-object branch, naming the tool", () => {
 		for (const inputSchema of [
 			{ anyOf: [{ type: "object", properties: {} }, { type: "string" }] },

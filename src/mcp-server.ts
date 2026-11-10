@@ -60,9 +60,12 @@ function assertObjectSchema(tool: McpToolDef): void {
 	}
 }
 
+// Every root combinator present must hold only object branches: one scalar branch
+// anywhere would be dropped silently by the flattening.
 function isObjectUnion(schema: Record<string, unknown>): boolean {
 	if (schema.type !== undefined) return false;
-	return ROOT_COMBINATORS.some((key) => {
+	const present = ROOT_COMBINATORS.filter((key) => key in schema);
+	return present.length > 0 && present.every((key) => {
 		const branches = schema[key];
 		return Array.isArray(branches) && branches.length > 0
 			&& branches.every((branch) => {
@@ -130,7 +133,7 @@ function flattenRootCombinators(schema: Record<string, unknown>): { schema: Reco
 	};
 	const properties: Record<string, unknown> = Object.create(null);
 	const required: string[] = [];
-	const rootProperties = isRecord(schema.properties) ? schema.properties : {};
+	const fixedProperties = new Set<string>();
 	const mergedAlternatives = new WeakSet<object>();
 	const isMergedAlternatives = (value: unknown): value is { anyOf: unknown[] } => isRecord(value) && mergedAlternatives.has(value);
 	const declaresAlternative = (current: unknown, value: unknown) => {
@@ -138,14 +141,15 @@ function flattenRootCombinators(schema: Record<string, unknown>): { schema: Reco
 		const known = isMergedAlternatives(current) ? current.anyOf : [current];
 		return known.some((alternative) => JSON.stringify(alternative) === serialized);
 	};
-	// A root declaration wins, as in CC's normalizer. A property anyOf/oneOf branches
-	// declare differently keeps every alternative (`mode: "outline"` in one branch,
-	// `"served" | "verbatim"` in another); allOf branches all apply, so the first stays.
+	// A root declaration wins, as in CC's normalizer, and so does an allOf one, which
+	// applies to every call: both are added before the alternatives. A property
+	// anyOf/oneOf branches declare differently keeps every alternative (`mode:
+	// "outline"` in one branch, `"served" | "verbatim"` in another).
 	const addProperties = (source: unknown, alternatives = false) => {
 		if (!isRecord(source) || !isRecord(source.properties)) return;
 		for (const [key, value] of Object.entries(source.properties)) {
 			if (!Object.hasOwn(properties, key)) properties[key] = value;
-			else if (alternatives && !Object.hasOwn(rootProperties, key) && !declaresAlternative(properties[key], value)) {
+			else if (alternatives && !fixedProperties.has(key) && !declaresAlternative(properties[key], value)) {
 				const current = properties[key];
 				const merged = { anyOf: [...(isMergedAlternatives(current) ? current.anyOf : [current]), value] };
 				mergedAlternatives.add(merged);
@@ -159,7 +163,9 @@ function flattenRootCombinators(schema: Record<string, unknown>): { schema: Reco
 	};
 
 	addProperties(schema);
-	for (const key of combinators) for (const branch of branchesOf(key)) addProperties(branch, key !== "allOf");
+	for (const branch of branchesOf("allOf")) addProperties(branch);
+	for (const key of Object.keys(properties)) fixedProperties.add(key);
+	for (const key of combinators) if (key !== "allOf") for (const branch of branchesOf(key)) addProperties(branch, true);
 	addRequired(schema);
 	for (const branch of branchesOf("allOf")) addRequired(branch);
 
