@@ -763,9 +763,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 //
 // Why reuse the sessionId across rebuilds:
 //   CC re-reads the JSONL on every --resume call — no in-process UUID
-//   caching. Validated in tests/exp-session-clear.mjs, including the case
-//   where CC had appended its own tool_use/tool_result records between
-//   rebuilds. Preserving the UUID means stable log correlation across
+//   caching, including when CC had appended its own tool_use/tool_result
+//   records between rebuilds (validated by an experiment no longer in the tree). Preserving the UUID means stable log correlation across
 //   provider switches and no orphaned session files.
 //
 // Log strings still say "Case 1/2/3/4" so existing diagnostics (int-cache.sh,
@@ -910,7 +909,6 @@ export const __test = {
 		historyRewrittenBySession.clear();
 	},
 	markRebuildForSession,
-	getHistoryRewritten: () => historyRewrittenBySession.size > 0,
 	historyRewrittenBySession,
 	armStaleContexts,
 	discardRewrittenQuery,
