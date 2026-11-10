@@ -1011,8 +1011,9 @@ const activeQueryContexts = new Set<QueryContext>();
 // overwrite each other in the TUI.
 let pendingNotices: string[] = [];
 
-// Set at activation for a user whose config still enables the removed AskClaude tool;
-// shown on the first bridge query, like the startup notice, and only to a terminal user.
+// Set at each session_start for a user whose config still enables the removed AskClaude
+// tool, so every session shows it once: on its first bridge query, like the startup
+// notice, and only to a terminal user.
 let removedAskClaudeNoticeText: string | undefined;
 
 function showRemovedAskClaudeNoticeOnce(): void {
@@ -2575,7 +2576,6 @@ export default function (pi: ExtensionAPI) {
 	if (!config.startupNoticeShown && config.provider?.plan === undefined) {
 		pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
 	}
-	removedAskClaudeNoticeText = removedAskClaudeNotice();
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
@@ -2600,6 +2600,7 @@ export default function (pi: ExtensionAPI) {
 		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
 		piMode = ctx.mode;
 		rememberSessionCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
+		removedAskClaudeNoticeText = removedAskClaudeNotice();
 		rememberForkParent(event, ctx.sessionManager.getSessionId()); // fork: fork cache
 		// A session in another process (a pi-subagents background child) may query with
 		// its parent's prompt; load the parent session's stored captures (issue #37).
