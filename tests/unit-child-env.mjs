@@ -30,19 +30,23 @@ describe("Claude Code child environment", () => {
 	});
 
 	it("drops the parent Claude Code session's markers when pi runs inside Claude Code", () => {
+		const markers = [
+			"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+			"CLAUDE_PID", "CLAUDE_EFFORT", "TRACEPARENT", "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_ENV_FILE",
+			"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_EXECPATH",
+			"CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+		];
 		const parent = {
-			CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ID: "parent", CLAUDE_ENV_FILE: "/tmp/env.sh",
-			CLAUDE_CODE_SSE_PORT: "1234", CLAUDE_CONFIG_DIR: "/cfg", ANTHROPIC_API_KEY: "k", AI_AGENT: "pi",
+			...Object.fromEntries(markers.map((name) => [name, "parent"])),
+			CLAUDE_CONFIG_DIR: "/cfg", ANTHROPIC_API_KEY: "k", AI_AGENT: "pi",
 		};
 		const env = __test.ccChildEnv(parent);
-		for (const name of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_ENV_FILE", "CLAUDE_CODE_SSE_PORT"]) {
-			assert.ok(!(name in env), `${name} reached the child`);
-		}
+		for (const name of markers) assert.ok(!(name in env), `${name} reached the child`);
 		assert.equal(env.CLAUDE_CONFIG_DIR, "/cfg");
 		assert.equal(env.ANTHROPIC_API_KEY, "k");
 		assert.equal(env.AI_AGENT, "pi");
 		// The caller's object is not modified.
-		assert.equal(parent.CLAUDECODE, "1");
+		assert.equal(parent.CLAUDECODE, "parent");
 	});
 
 	it("does not set the non-essential-traffic flag on pi's own process", () => {
