@@ -50,12 +50,29 @@ export interface McpToolDef {
 // so a scalar or array one typechecks but cannot go on the wire — that is a bug
 // in the tool, and reporting it at startup names the culprit. Degrading it to
 // "takes no arguments" instead would surface much later as Claude calling the
-// tool with no arguments and pi's own validation rejecting them.
+// tool with no arguments and pi's own validation rejecting them. A root
+// combinator without a `type` (TypeBox's Type.Union of objects) is an object
+// schema when every branch is one: flattenRootCombinators turns it into one.
 function assertObjectSchema(tool: McpToolDef): void {
-	const schema = tool.inputSchema as Record<string, unknown> | undefined;
-	if (!schema || schema.type !== "object") {
+	const schema = tool.inputSchema;
+	if (!isRecord(schema) || (schema.type !== "object" && !isObjectUnion(schema))) {
 		throw new Error(`${tool.name}: MCP tool parameters must be an object schema, got ${JSON.stringify(schema)}`);
 	}
+}
+
+// Every root combinator present must hold only object branches: one scalar branch
+// anywhere would be dropped silently by the flattening.
+function isObjectUnion(schema: Record<string, unknown>): boolean {
+	if (schema.type !== undefined) return false;
+	const present = ROOT_COMBINATORS.filter((key) => key in schema);
+	return present.length > 0 && present.every((key) => {
+		const branches = schema[key];
+		return Array.isArray(branches) && branches.length > 0
+			&& branches.every((branch) => {
+				const resolved = resolveLocalRef(branch, schema);
+				return isRecord(resolved) && resolved.type === "object";
+			});
+	});
 }
 
 // Claude Code drops an MCP tool outright when its input schema has a top-level
@@ -114,11 +131,31 @@ function flattenRootCombinators(schema: Record<string, unknown>): { schema: Reco
 		const branches = schema[key];
 		return Array.isArray(branches) ? branches.map((branch) => resolveLocalRef(branch, schema)) : [];
 	};
-	const properties: Record<string, unknown> = {};
+	const properties: Record<string, unknown> = Object.create(null);
 	const required: string[] = [];
-	const addProperties = (source: unknown) => {
+	const fixedProperties = new Set<string>();
+	const mergedAlternatives = new WeakSet<object>();
+	const isMergedAlternatives = (value: unknown): value is { anyOf: unknown[] } => isRecord(value) && mergedAlternatives.has(value);
+	const declaresAlternative = (current: unknown, value: unknown) => {
+		const serialized = JSON.stringify(value);
+		const known = isMergedAlternatives(current) ? current.anyOf : [current];
+		return known.some((alternative) => JSON.stringify(alternative) === serialized);
+	};
+	// A root declaration wins, as in CC's normalizer, and so does an allOf one, which
+	// applies to every call: both are added before the alternatives. A property
+	// anyOf/oneOf branches declare differently keeps every alternative (`mode:
+	// "outline"` in one branch, `"served" | "verbatim"` in another).
+	const addProperties = (source: unknown, alternatives = false) => {
 		if (!isRecord(source) || !isRecord(source.properties)) return;
-		for (const [key, value] of Object.entries(source.properties)) if (!(key in properties)) properties[key] = value;
+		for (const [key, value] of Object.entries(source.properties)) {
+			if (!Object.hasOwn(properties, key)) properties[key] = value;
+			else if (alternatives && !fixedProperties.has(key) && !declaresAlternative(properties[key], value)) {
+				const current = properties[key];
+				const merged = { anyOf: [...(isMergedAlternatives(current) ? current.anyOf : [current]), value] };
+				mergedAlternatives.add(merged);
+				properties[key] = merged;
+			}
+		}
 	};
 	const addRequired = (source: unknown) => {
 		if (!isRecord(source) || !Array.isArray(source.required)) return;
@@ -126,7 +163,9 @@ function flattenRootCombinators(schema: Record<string, unknown>): { schema: Reco
 	};
 
 	addProperties(schema);
-	for (const key of combinators) for (const branch of branchesOf(key)) addProperties(branch);
+	for (const branch of branchesOf("allOf")) addProperties(branch);
+	for (const key of Object.keys(properties)) fixedProperties.add(key);
+	for (const key of combinators) if (key !== "allOf") for (const branch of branchesOf(key)) addProperties(branch, true);
 	addRequired(schema);
 	for (const branch of branchesOf("allOf")) addRequired(branch);
 

@@ -9,6 +9,8 @@
  */
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
+import { Type } from "typebox";
+import { Compile } from "typebox/compile";
 import { createToolServer } from "../src/mcp-server.js";
 
 const NESTED_TOOL_SCHEMA = {
@@ -200,6 +202,89 @@ describe("MCP tool schema with top-level combinators", () => {
 	it("leaves the description alone when there is no top-level combinator", async () => {
 		const { description } = await listTool({ type: "object", properties: { a: { type: "string" } } });
 		assert.strictEqual(description, "d");
+	});
+
+	// TypeBox's Type.Union of objects carries no root `type` (pi-better-edit's `read`,
+	// upstream issue #250). Each branch is an object, so it can go on the wire once
+	// flattened; and a property the branches declare differently must keep every
+	// alternative, or Claude only learns the first branch's `mode`.
+	const readBranches = [
+		Type.Object({ file: Type.String(), mode: Type.Literal("outline") }),
+		Type.Object({ file: Type.String(), mode: Type.Optional(Type.Union([Type.Literal("served"), Type.Literal("verbatim")])) }),
+	];
+
+	it("accepts an object union without a root type and keeps every branch's alternatives", async () => {
+		for (const branches of [readBranches, [...readBranches].reverse()]) {
+			const schema = Type.Union(branches);
+			const before = JSON.stringify(schema);
+			assert.ok(!("type" in schema), "exercise TypeBox's actual union shape");
+
+			const { description, inputSchema: listed } = await listTool(schema);
+
+			assert.strictEqual(listed.type, "object");
+			for (const key of ["anyOf", "oneOf", "allOf"]) assert.ok(!(key in listed), `top-level ${key} must not reach CC`);
+			assert.deepStrictEqual(Object.keys(listed.properties).sort(), ["file", "mode"]);
+			assert.deepStrictEqual(listed.properties.file, { type: "string" }, "identical declarations stay unwrapped");
+			const advertised = Compile(listed);
+			for (const mode of [undefined, "outline", "served", "verbatim"]) {
+				assert.ok(advertised.Check({ file: "a.md", ...(mode ? { mode } : {}) }), `advertised schema lost mode ${mode}`);
+			}
+			assert.ok(!advertised.Check({ file: "a.md", mode: "bogus" }), "a value no branch allows stays invalid");
+			assert.ok(description.startsWith("Input constraint: Provide parameters for at least one of"));
+			assert.strictEqual(JSON.stringify(schema), before, "advertising must not mutate pi's schema");
+		}
+	});
+
+	for (const key of ["anyOf", "oneOf"]) {
+		it(`merges a property two ${key} branches declare differently instead of keeping the first`, async () => {
+			const { inputSchema: listed } = await listTool({ type: "object", [key]: readBranches });
+			const advertised = Compile(listed);
+			for (const mode of ["outline", "served", "verbatim"]) {
+				assert.ok(advertised.Check({ file: "a.md", mode }), `lost mode ${mode}`);
+			}
+		});
+	}
+
+	it("still lets a root property win over the branches' declarations", async () => {
+		const { inputSchema: listed } = await listTool({ type: "object", properties: { mode: { type: "string", const: "outline" } }, anyOf: readBranches });
+		assert.deepStrictEqual(listed.properties.mode, { type: "string", const: "outline" });
+	});
+
+	it("rejects a rootless schema when any root combinator has a non-object branch", () => {
+		assert.throws(
+			() => createToolServer("custom-tools", [{
+				name: "mixed_tool",
+				description: "",
+				inputSchema: { anyOf: [{ type: "object", properties: {} }], oneOf: [{ type: "string" }] },
+				handler: async () => ({ content: [] }),
+			}]),
+			/mixed_tool: MCP tool parameters must be an object schema/,
+		);
+	});
+
+	it("keeps an allOf declaration, which applies to every call, over anyOf alternatives", async () => {
+		const { inputSchema: listed } = await listTool({
+			type: "object",
+			anyOf: [
+				{ type: "object", properties: { mode: { type: "string", enum: ["a", "b"] } } },
+				{ type: "object", properties: { mode: { type: "string", enum: ["c"] } } },
+			],
+			allOf: [{ type: "object", properties: { mode: { type: "string", enum: ["a"] } } }],
+		});
+		assert.deepStrictEqual(listed.properties.mode, { type: "string", enum: ["a"] });
+	});
+
+	it("rejects a rootless union with a non-object branch, naming the tool", () => {
+		for (const inputSchema of [
+			{ anyOf: [{ type: "object", properties: {} }, { type: "string" }] },
+			{ anyOf: [] },
+			{ oneOf: [{ type: "string" }, { type: "number" }] },
+		]) {
+			assert.throws(
+				() => createToolServer("custom-tools", [{ name: "mixed_tool", description: "", inputSchema, handler: async () => ({ content: [] }) }]),
+				/mixed_tool: MCP tool parameters must be an object schema/,
+			);
+		}
 	});
 });
 
