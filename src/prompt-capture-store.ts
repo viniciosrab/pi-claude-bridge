@@ -110,6 +110,13 @@ function rememberKey(piSessionId: string, systemPrompt: string, oldest = false):
 	touchSession(piSessionId);
 }
 
+/** The pi boundary that recorded a capture, without the labels a load adds around it
+ *  ("parent session X (turn_start)"), so a capture reloaded on every resume does not
+ *  nest one label deeper each time. */
+function recordedBoundary(source: string | undefined): string | undefined {
+	return source?.match(/\(([^()]*)\)+$/)?.[1] ?? source;
+}
+
 function toStored(capture: PromptCapture): StoredCapture {
 	return {
 		assembledPrompt: capture.assembledPrompt,
@@ -118,7 +125,7 @@ function toStored(capture: PromptCapture): StoredCapture {
 		contextFiles: capture.contextFiles,
 		skills: capture.skills,
 		...(capture.sections ? { sections: capture.sections } : {}),
-		...(capture.source ? { source: capture.source } : {}),
+		...(capture.source ? { source: recordedBoundary(capture.source) } : {}),
 	};
 }
 
@@ -192,7 +199,8 @@ function loadStoredSession(storeSessionId: string, ownSessionId: string, capture
 	for (const capture of stored) {
 		if (captures.has(capture.assembledPrompt)) continue;
 		const { assembledPrompt, source, ...input } = capture;
-		captures.record(assembledPrompt, input, `${label}${source ? ` (${source})` : ""}`);
+		const boundary = recordedBoundary(source);
+		captures.record(assembledPrompt, input, `${label}${boundary ? ` (${boundary})` : ""}`);
 		added++;
 	}
 	for (const capture of [...stored].reverse()) rememberKey(ownSessionId, capture.assembledPrompt, true);

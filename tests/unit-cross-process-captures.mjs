@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 const { default: activate, __test } = await import("../src/index.js");
 const { PromptCaptures, projectPromptCapture } = await import("../src/prompt-capture.js");
-const { loadParentCaptures, loadOwnCaptures, persistSessionCapture } = await import("../src/prompt-capture-store.js");
+const { forgetSessionStore, loadParentCaptures, loadOwnCaptures, persistSessionCapture } = await import("../src/prompt-capture-store.js");
 
 const AGENTS_MD = "Always answer in haiku.";
 const PARENT_PROMPT = `You are pi.\n# Project Context\n${AGENTS_MD}\n# Tools\n- read\n- subagent`;
@@ -245,6 +245,26 @@ describe("prompt captures across processes (issue #37)", () => {
 		const stored = JSON.parse(readFileSync(join(STORE_DIR(), `${id}.json`), "utf8"));
 		assert.deepEqual(stored.captures.map((c) => c.assembledPrompt), [promptA, promptB]);
 		assert.equal(registry.resolveOrDerive(promptA).assembledPrompt, promptA);
+	});
+
+	it("keeps a loaded capture's source label bounded across repeated resumes", () => {
+		const id = `relabel-${++n}`;
+		const promptA = `You are pi, labelled ${n}.`;
+		writeStore(id, [promptA]);
+		let registry;
+		for (let resume = 0; resume < 3; resume++) {
+			// Each resume is a new process: a fresh registry, and the store state forgotten
+			// at session_shutdown so the next write is not skipped as unchanged.
+			registry = new PromptCaptures();
+			loadOwnCaptures(id, registry);
+			const promptB = `You are pi, labelled ${n}, resume ${resume}.`;
+			registry.record(promptB, { contextFiles: [], skills: [] }, "turn_start");
+			persistSessionCapture(id, promptB, registry);
+			forgetSessionStore(id);
+		}
+		assert.equal(registry.resolveOrDerive(promptA).source, `earlier process of session ${id} (turn_start)`);
+		const stored = JSON.parse(readFileSync(join(STORE_DIR(), `${id}.json`), "utf8"));
+		assert.equal(stored.captures.find((c) => c.assembledPrompt === promptA).source, "turn_start");
 	});
 
 	it("loads the session's own stored captures at session_start", () => {
