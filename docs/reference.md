@@ -126,6 +126,10 @@ Requires the following in `~/.pi/agent/subagents.json`:
 {"promptInheritance": {"claude-bridge": "portable"}}
 ```
 
+### Forked subagents in another process
+
+A [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) child with forked context (`context: "fork"`, or an agent such as `oracle` whose default context is `fork`) sends its parent's system prompt to reuse the parent's prompt cache. A background child (`async: true`) runs in its own process, which has not seen that prompt. So each pi session that has a session file stores its prompt captures in `claude-bridge-captures/<session id>.json` in pi's agent dir, and a session whose header names a `parentSession` loads that session's captures when it starts. The files are owner-only and hold what the bridge sends to Claude Code: context files (AGENTS.md), skill names and paths, and the custom and appended prompts. Files older than 7 days are removed. A session started with `--no-session` stores nothing.
+
 ## Known issues
 
 **A session rebuild re-sends the whole conversation.** The bridge rewrites Claude Code's session from pi's history whenever pi rewrites that history — `/compact`, tree navigation, or an extension that edits past messages — and the next request usually misses the prompt cache for everything past the system prompt. An abort, an API error, `/fork`, `/clone` and reopening a session resume Claude Code's own session file instead, and keep the cache (see `CHANGELOG.md`).
