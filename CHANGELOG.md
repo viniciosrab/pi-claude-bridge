@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Fix: the session mirror file is owner-only and safe to save from two windows** — `claude-bridge-mirrors/` files, which can hold an aborted prompt's text, were created with default permissions; they are now `0600` in a `0700` directory, like `claude-bridge-captures/`. Each process also writes its own temp file before the rename, so two pi windows saving the same session cannot leave a half-written mirror.
+- **Fix: no false "malformed JSONL" warning for an empty rebuilt session** — a rebuild whose history converted to no records was reported as a broken session file, with a request to open an issue.
 - **Fix: a rebuild that fails no longer deletes Claude Code's session file** — a rebuild deleted the old session file before converting pi's history, so a conversion error (or a failed save) left no file, with the bridge still pointing at it and the carried `@file` expansions lost. The history is now converted first; if the save itself fails, the bridge forgets the session and rebuilds cleanly next turn.
 - **Fix: an answer that arrived without stream events was shown twice** — when Claude Code delivered a turn's text only as an assistant message (a non-streaming fallback before any stream event), the result's copy of the same text was added as a second block, so pi stored and replayed the answer twice. The result text is now added only when no text block reached the turn.
 - **Fix: a config file that is valid JSON but not an object no longer stops the extension loading** — a `.pi/claude-bridge.json` in a cloned repo (or the global config) holding `null` threw at activation, so no Claude model was registered. A file that is not a JSON object is now ignored like an unparseable one.
