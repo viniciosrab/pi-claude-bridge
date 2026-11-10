@@ -45,10 +45,12 @@ function fail(msg) {
 
 // Substring matching is not enough: a refusal like "I don't see an image, I made
 // an error" contains "red". Only the first word counts, so a model that cannot
-// see the image has no way to accidentally pass.
+// see the image has no way to accidentally pass. Portuguese names count too: a user's
+// global pi instructions can make the non-bridge model answer in Portuguese.
+const COLOUR_NAMES = new Set(["red", "crimson", "vermelho", "vermelha", "carmesim"]);
 function namesTheColour(answer) {
 	const firstWord = answer.trim().toLowerCase().replace(/^[^a-z]+/, "").split(/[^a-z]/)[0];
-	return firstWord === "red" || firstWord === "crimson";
+	return COLOUR_NAMES.has(firstWord);
 }
 
 await startAndWait();

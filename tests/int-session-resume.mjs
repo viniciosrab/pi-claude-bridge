@@ -198,26 +198,24 @@ try {
   if (!lower8.includes(WORD_B)) throw new Error(`Turn 8 response missing '${WORD_B}': ${text8}`);
   if (!lower8.includes(WORD_C)) throw new Error(`Turn 8 response missing '${WORD_C}': ${text8}`);
 
-  // sessionId stability: sessionId should stay stable across normal
-  // rebuilds (Case 2 → Case 4 → Case 3). It's allowed to rotate exactly
-  // once per abort: the post-abort rebuild takes a fresh UUID on purpose,
-  // to avoid a race with the killed CC subprocess's late interrupt-cleanup
-  // writes (which would otherwise append an orphan record at the same
-  // path and break the parent-uuid chain for the next resume).
-  //
-  // This test exercises one abort (Turn 7), so we expect exactly 2 unique
-  // sessionIds: pre-abort and post-abort.
+  // sessionId stability: normal rebuilds (Case 2 → Case 4) keep the session id. After
+  // the abort (Turn 7) the bridge recovers one of two ways (postAbortSync in src/fork.ts):
+  // it resumes the session the killed CLI finished, keeping the prompt cache, or, when
+  // the abort landed before Claude Code saved the prompt, it rebuilds on a fresh id.
+  // Either is correct; exactly one of them must happen, and only a rebuild adds an id.
   const debugLog = readFileSync(DEBUG_LOG, "utf8");
   const sessionIds = new Set();
-  const rotatedPostAbort = [];
-  for (const match of debugLog.matchAll(/syncResult: path=(reuse|rebuild) sessionId=([a-f0-9-]+)(?: priors=\d+ (\S+))?/g)) {
+  let resumed = 0;
+  let rotated = 0;
+  for (const match of debugLog.matchAll(/syncResult: path=(reuse|rebuild) sessionId=([a-f0-9-]+)([^\n]*)/g)) {
     sessionIds.add(match[2]);
-    if (match[3] === "rotated-post-abort") rotatedPostAbort.push(match[2]);
+    if (match[1] === "reuse" && / post-abort$/.test(match[3])) resumed++;
+    if (match[1] === "rebuild" && / rotated-post-abort$/.test(match[3])) rotated++;
   }
   if (sessionIds.size === 0) throw new Error("no syncResult markers found in debug log");
-  if (sessionIds.size > 2) throw new Error(`expected ≤2 distinct sessionIds (one pre-abort, one post-abort rotation), got ${sessionIds.size}: ${[...sessionIds].join(", ")}`);
-  if (rotatedPostAbort.length !== 1) throw new Error(`expected exactly 1 post-abort rotation, got ${rotatedPostAbort.length}`);
-  console.log(`  sessionIds observed: ${sessionIds.size} (expected 2 due to 1 post-abort rotation)`);
+  if (resumed + rotated !== 1) throw new Error(`expected exactly 1 post-abort recovery, got ${resumed} resumes and ${rotated} rebuilds`);
+  if (sessionIds.size !== 1 + rotated) throw new Error(`expected ${1 + rotated} sessionIds, got ${sessionIds.size}: ${[...sessionIds].join(", ")}`);
+  console.log(`  sessionIds observed: ${sessionIds.size}, recovered after the abort by ${resumed ? "resuming" : "rebuilding"}`);
 
   console.log("PASS");
 } catch (e) {
