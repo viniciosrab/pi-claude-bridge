@@ -12,22 +12,12 @@ The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai
 
 **1M Context:** Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 get 1M context. Opus 4.6 gets 1M only on a Max plan or with Extra Usage, and Sonnet 4.6 only with Extra Usage — set `provider.plan` and/or `provider.longContextExtraUsage` as described in [Configuration](#configuration).
 
-## AskClaude Tool
-
-**Deprecated:** AskClaude is an opt-in legacy tool and may be removed in a future release. You should set `askClaude.enabled` to `true` (see [Configuration](#configuration)) to use it. You can recreate similar functionality with one of the many Pi subagent extensions.
-
 ## Configuration
 
-Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in a project's `.pi/claude-bridge.json` are ignored, so a cloned repository cannot change them. Set `CLAUDE_BRIDGE_CONFIG` to a file path to use that file as the global config instead.
+Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.pi/claude-bridge.json` is ignored, so a cloned repository cannot change them. Set `CLAUDE_BRIDGE_CONFIG` to a file path to use that file as the global config instead.
 
 ```json
 {
-  "askClaude": {
-    "enabled": true,
-    "allowFullMode": true,
-    "defaultIsolated": false,
-    "description": "Custom tool description override"
-  },
   "provider": {
     "plan": "max",
     "longContextExtraUsage": false,
@@ -37,16 +27,6 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in
 }
 ```
 
-`askClaude`:
-- `enabled` — register the AskClaude tool (default `false`). If it's unset, the startup notice below points this out once.
-- `name` — override the tool's pi-side name (default `"AskClaude"`)
-- `label` — override the TUI label (default `"Ask Claude Code"`)
-- `description` — override the tool description. Default when `allowFullMode: true`: *"Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself."*
-- `defaultMode` — `"read"` (default), `"none"`, or `"full"`
-- `defaultIsolated` — start each call in a fresh session (default `false`)
-- `allowFullMode` — allow `mode: "full"`; set `false` to lock it out
-- `appendSkills` — forward pi's skills block into the system prompt (default `true`)
-
 `provider`:
 - `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus with 1M context.
 - `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro. Not needed for Opus 4.7 or 4.8.
@@ -54,17 +34,17 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
-- `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none on provider turns. AskClaude always keeps `~/.claude/settings.json` and, with `"all"`, adds only the repository's `.claude/settings.json`.
+- `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none.
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
 
 
-**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. There's also a deprecation notice on first use of AskClaude that records its display date as `askClaudeDeprecationShown`.
+**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. The `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool are ignored.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
 ## Tests
 
-`npm run test:unit` for offline tests. `npm test` adds integration tests that hit APIs; set `CLAUDE_BRIDGE_TESTING_ALT_MODEL` in `.env.test` for the alt-provider smoke test.
+`npm run test:unit` for offline tests. `npm test` adds integration tests that hit APIs; set `CLAUDE_BRIDGE_TESTING_ALT_MODEL` in `.env.test` for the alt-provider session-resume test.
 
 Integration tests spawn real `pi` and Claude Code subprocesses and need write access to `~/.claude` — a sandbox that blocks it makes `--resume` fail with `No conversation found with session ID`.
 
@@ -73,7 +53,7 @@ Integration tests spawn real `pi` and Claude Code subprocesses and need write ac
 Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 
 - **Bridge log** at `claude-bridge.log` in pi's agent dir (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) — provider calls, session sync decisions, tool results, CC stderr. Override location with `CLAUDE_BRIDGE_DEBUG_PATH`.
-- **Per-query CC CLI logs** at `cc-cli-logs/<timestamp>-<tag>-<seq>.log` in the same directory — the subprocess's own debug stream; tag is `provider` or `askclaude`. Shows CC's view of session loading, API requests, and tool calls.
+- **Per-query CC CLI logs** at `cc-cli-logs/<timestamp>-<tag>-<seq>.log` in the same directory — the subprocess's own debug stream; tag is `provider` or `compact-summary`. Shows CC's view of session loading, API requests, and tool calls.
 
 When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the `syncResult:` lines from the bridge log plus the matching `cc-cli-logs/` file for the failing query.
 

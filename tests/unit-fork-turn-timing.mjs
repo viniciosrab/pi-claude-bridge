@@ -141,7 +141,7 @@ it("times only streamed-prompt launches and keeps the SDK's Query object", async
 	const drain = async (q) => { const seen = []; for await (const m of q) seen.push(m.type); return seen; };
 	const types = ["system", "stream_event", "stream_event", "stream_event", "stream_event", "result"];
 
-	// The isolated summary and AskClaude pass a string prompt: untouched, nothing logged.
+	// The isolated summary passes a string prompt: untouched, nothing logged.
 	const plain = timed({ prompt: "summarize", options: {} });
 	assert.equal(Object.hasOwn(plain, Symbol.asyncIterator), false, "a string-prompt query is not wrapped");
 	assert.deepEqual(await drain(plain), types);
