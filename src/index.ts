@@ -1,7 +1,7 @@
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, isToolCallEventType, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { query, type EffortLevel, type ThinkingConfig, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-stream-args.js"; // fork: streaming tool args
 import "./fork-tool-streaming.js"; // fork: eager tool input streaming
@@ -55,17 +55,47 @@ const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 //   into its session file (`api-request`, `api-request-shape`, `api-request-blob`
 //   records). CC never reads them back to build a request; they only make the
 //   file about a third larger.
+// - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1: no update checks, MCP registry or
+//   telemetry from the child. Set here rather than on pi's own process, so commands
+//   pi runs do not inherit it.
 // - CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1: a resumed session that ends at
 //   a tool result (after a terminating tool, or a discarded parked query) reads to CC
 //   as an interrupted turn, and behind a server flag CC inserts a "Continue from where
 //   you left off." user message ahead of pi's prompt. pi supplies every prompt, so
 //   every turn counts as too old to resume.
+// - CLAUDE_CODE_SILENT_TURN_REMINDER=0: on some models CC adds "The user hasn't heard
+//   from you in a while..." after several assistant messages with no visible text.
+//   pi decides what the model is told; the message is not in pi's history and the
+//   user never sees it.
 const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
 	CLAUDE_CODE_ELEGANT_MEADOW: "0",
+	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 	CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "1",
+	CLAUDE_CODE_SILENT_TURN_REMINDER: "0",
 } as const;
+
+// Set by Claude Code on its own child processes, or exported by that parent. When pi
+// runs inside a Claude Code session they describe that session, not ours: the SDK
+// stamps its own entrypoint and version only when they're unset, and CC's Bash tool
+// runs CLAUDE_ENV_FILE's script. AI_AGENT is left alone: pi overwrites it at startup.
+const PARENT_SESSION_VARS = [
+	"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+	"CLAUDE_PID", "CLAUDE_EFFORT", "TRACEPARENT", "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_ENV_FILE",
+	"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_EXECPATH",
+	"CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+];
+
+// Environment for every Claude Code subprocess. Config (ANTHROPIC_*, CLAUDE_CONFIG_DIR,
+// CLAUDE_CODE_USE_BEDROCK, ...) always passes through; parent-session markers are
+// dropped only when CLAUDECODE says pi was started from inside Claude Code.
+// CC_CHILD_ENV goes last so its guards always hold.
+function ccChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...parent };
+	if (parent.CLAUDECODE) for (const name of PARENT_SESSION_VARS) delete env[name];
+	return { ...env, ...CC_CHILD_ENV };
+}
 
 // Pi owns context files on the provider path, so Claude Code must not load its
 // own on top: otherwise project CLAUDE.md/AGENTS.md files arrive twice, and
@@ -612,13 +642,14 @@ async function runIsolatedSummary(
 		const cliModel = claudeCodeModelId(model, longContextSettings);
 		// Honour the caller's reasoning level, same mapping as the provider path.
 		const effort = effortForReasoning(model, options?.reasoning);
-		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} effort=${effort ?? "default"} promptLen=${promptText.length}`);
+		const thinking = thinkingForReasoning(model, options?.reasoning);
+		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} effort=${effort ?? "default"}${thinking ? " thinking=disabled" : ""} promptLen=${promptText.length}`);
 
 		sdkQuery = queryImpl({
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, ...CC_CHILD_ENV },
+				env: ccChildEnv(),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -629,6 +660,7 @@ async function runIsolatedSummary(
 				model: cliModel,
 				maxTurns: 1,
 				...(effort ? { effort } : {}),
+				...(thinking ? { thinking } : {}),
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 				...makeCliDebugOptions("compact-summary"),
 			},
@@ -937,6 +969,7 @@ export const __test = {
 	toBridgeContext,
 	isolatedStreamFn,
 	effortForReasoning,
+	thinkingForReasoning,
 	syncSharedSession,
 	extractUserPromptBlocks,
 	consumeQuery,
@@ -946,6 +979,7 @@ export const __test = {
 	toMcpToolDefs,
 	drainForAbort,
 	CC_CHILD_ENV,
+	ccChildEnv,
 	buildMcpServers,
 	get promptCaptures() {
 		return promptCaptures;
@@ -1216,6 +1250,15 @@ function effortForReasoning(model: Model<any>, reasoning: string | undefined): E
 	const mapped = model.thinkingLevelMap?.[reasoning];
 	if (mapped === undefined) return REASONING_TO_EFFORT[reasoning];
 	return VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined;
+}
+
+// Pi sends no reasoning level when thinking is off, and Claude Code then applies
+// its own default (thinking on). Disable thinking the way pi-ai's Anthropic
+// provider does: for reasoning models, unless the model's thinkingLevelMap marks
+// "off" unsupported (null), as on models that always think.
+function thinkingForReasoning(model: Model<any>, reasoning: string | undefined): ThinkingConfig | undefined {
+	if (reasoning || !model.reasoning || model.thinkingLevelMap?.off === null) return undefined;
+	return { type: "disabled" };
 }
 
 // --- Provider helpers: misc ---
@@ -2283,6 +2326,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
 	const effort = effortForReasoning(model, options?.reasoning);
+	const thinking = thinkingForReasoning(model, options?.reasoning);
 
 	const extraArgs: Record<string, string | null> = { model: cliModel, "replay-user-messages": null };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
@@ -2300,7 +2344,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV };
+	const childEnv = ccChildEnv();
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -2331,6 +2375,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		},
 		extraArgs,
 		...(effort ? { effort } : {}),
+		...(thinking ? { thinking } : {}),
 		...(mcpServers ? { mcpServers } : {}),
 		...(resumeSessionId ? { resume: resumeSessionId } : {}),
 		...(syncResult.resumeSessionAt ? { resumeSessionAt: syncResult.resumeSessionAt } : {}), // fork: error resume
@@ -2616,7 +2661,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ...CC_CHILD_ENV },
+			env: ccChildEnv(),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],
@@ -2726,9 +2771,6 @@ const PREVIEW_MAX_LINES = 6;
 let askClaudeToolName = "AskClaude";
 
 export default function (pi: ExtensionAPI) {
-	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
-	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-
 	const config = loadConfig(process.cwd());
 	let askClaudeDeprecationNoticeShown = Boolean(config.askClaudeDeprecationShown);
 	debug("loadConfig:", JSON.stringify(config));

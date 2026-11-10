@@ -98,7 +98,7 @@ export const FORK_CHILD_ENV = {
 } as const;
 
 /** Put FORK_CHILD_ENV on pi's own environment. Every Claude Code child the bridge
- *  spawns gets `{ ...process.env, ...CC_CHILD_ENV }`, so this reaches all of them
+ *  spawns gets `ccChildEnv()` (pi's environment plus CC_CHILD_ENV), so this reaches all of them
  *  without editing CC_CHILD_ENV, which upstream owns and pins in its own test. */
 export function applyForkChildEnv(env: NodeJS.ProcessEnv = process.env): void {
 	Object.assign(env, FORK_CHILD_ENV);
