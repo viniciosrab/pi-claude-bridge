@@ -21,7 +21,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
+import { claudeCodeSettings, loadConfig, markStartupNoticeShown, removedAskClaudeNotice, type Config } from "./config.js";
 import {
 	projectPromptCapture,
 	sharedPromptCaptures,
@@ -1001,6 +1001,16 @@ const activeQueryContexts = new Set<QueryContext>();
 // has this extension installed. One message, because consecutive info notifies
 // overwrite each other in the TUI.
 let pendingNotices: string[] = [];
+
+// Set at activation for a user whose config still enables the removed AskClaude tool;
+// shown on the first bridge query, like the startup notice, and only to a terminal user.
+let removedAskClaudeNoticeText: string | undefined;
+
+function showRemovedAskClaudeNoticeOnce(): void {
+	if (!removedAskClaudeNoticeText || piMode !== "tui") return;
+	piUI?.notify(removedAskClaudeNoticeText, "warning");
+	removedAskClaudeNoticeText = undefined;
+}
 
 function showStartupNoticeOnce(): void {
 	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
@@ -2021,6 +2031,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const afterAbort = deferUntilAbortSettles(streamClaudeAgentSdk, sessionStateFor(options?.sessionId) ?? persistedAbortMark(options?.sessionId), model, context, options); if (afterAbort) return afterAbort; // fork: abort resume
 	const forkStart = startFromParentFork(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), (s) => setSessionStateFor(options?.sessionId, { ...s, piSessionId: options?.sessionId }), debug, model, context, options); if (forkStart) return forkStart; // fork: fork cache
 	showStartupNoticeOnce();
+	showRemovedAskClaudeNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
 	// prompt-capture lookup below assumes (issue #106).
@@ -2543,6 +2554,7 @@ export default function (pi: ExtensionAPI) {
 	if (!config.startupNoticeShown && config.provider?.plan === undefined) {
 		pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
 	}
+	removedAskClaudeNoticeText = removedAskClaudeNotice();
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {

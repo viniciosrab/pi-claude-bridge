@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, globalConfigPath, loadConfig, markStartupNoticeShown } from "../src/config.js";
+import { claudeCodeSettings, globalConfigPath, loadConfig, markStartupNoticeShown, removedAskClaudeNotice } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -109,6 +109,20 @@ describe("loadConfig", () => {
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
+	}));
+
+	it("tells a user who still enables AskClaude that it was removed", () => withTempHome(() => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const path = join(globalDir, "claude-bridge.json");
+
+		assert.equal(removedAskClaudeNotice(), undefined, "no config file");
+		writeFileSync(path, JSON.stringify({ askClaude: { enabled: false } }));
+		assert.equal(removedAskClaudeNotice(), undefined, "AskClaude was off");
+		writeFileSync(path, JSON.stringify({ askClaude: { enabled: true } }));
+		const notice = removedAskClaudeNotice();
+		assert.match(notice, /AskClaude was removed/);
+		assert.ok(notice.includes(path), "names the file to edit");
 	}));
 
 	it("markStartupNoticeShown records today's date without dropping existing settings", () => withTempHome(() => {

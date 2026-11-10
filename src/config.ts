@@ -77,6 +77,15 @@ export function markStartupNoticeShown(): string {
 	return path;
 }
 
+/** The notice for a user whose global config still turns on the removed AskClaude tool,
+ *  or undefined. Shown until the section is gone, so no marker has to be written for it. */
+export function removedAskClaudeNotice(): string | undefined {
+	const path = globalConfigPath();
+	const askClaude = (tryParseJson(path) as { askClaude?: { enabled?: unknown } }).askClaude;
+	if (askClaude?.enabled !== true) return undefined;
+	return `AskClaude was removed from pi-claude-bridge; its settings are ignored. Select a claude-bridge model with /model to use Claude, and delete the "askClaude" section from ${path} to hide this notice.`;
+}
+
 export function loadConfig(cwd: string): Config {
 	const global = tryParseJson(globalConfigPath());
 	const project = tryParseJson(join(cwd, CONFIG_DIR_NAME, "claude-bridge.json"));
