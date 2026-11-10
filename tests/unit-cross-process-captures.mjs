@@ -28,6 +28,9 @@ const PARENT_PROMPT = `You are pi.\n# Project Context\n${AGENTS_MD}\n# Tools\n- 
 const CHILD_OWN_PROMPT = "You are the oracle. Advise only.";
 const INSTRUCTIONS = "<subagent_instructions>\nYou are the oracle.\n</subagent_instructions>";
 const STORE_DIR = () => join(getAgentDir(), "claude-bridge-captures");
+// beforeEach deletes STORE_DIR(): refuse to run against a real agent dir (run through
+// `npm run test:unit`, whose tests/lib/setup.mjs points it at a temp dir).
+if (!getAgentDir().startsWith(tmpdir())) throw new Error(`refusing to run outside a temp agent dir: ${getAgentDir()}`);
 
 /** Like tests/lib/mock-pi.mjs, but keeps every handler per event: the bridge
  *  registers more than one session_start handler. */

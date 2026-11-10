@@ -50,12 +50,15 @@ function prune(now: number): void {
 	const s = state();
 	if (s.pruned) return;
 	s.pruned = true;
-	try {
-		for (const name of readdirSync(storeDir())) {
+	let names: string[];
+	try { names = readdirSync(storeDir()); } catch { return; }
+	for (const name of names) {
+		// Per file: another process may remove or replace one while this loops.
+		try {
 			const file = join(storeDir(), name);
 			if (now - statSync(file).mtimeMs > MAX_AGE_MS) rmSync(file, { force: true });
-		}
-	} catch {}
+		} catch {}
+	}
 }
 
 function rememberKey(piSessionId: string, systemPrompt: string, oldest = false): void {
