@@ -121,8 +121,8 @@ describe("provider query settings", () => {
 
 describe("isolated summary settingSources", () => {
 	// Compaction and other one-offs load no settings files, whatever the provider option says.
-	it("stays empty when loadClaudeSettings is \"all\"", async () => {
-		register({ provider: { loadClaudeSettings: "all" } });
+	for (const choice of [undefined, "all", true, false]) it(`stays empty when loadClaudeSettings is ${JSON.stringify(choice)}`, async () => {
+		register({ provider: choice === undefined ? {} : { loadClaudeSettings: choice } });
 		let seen;
 		setQuery(({ options }) => {
 			seen = options;

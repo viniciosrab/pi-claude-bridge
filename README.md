@@ -28,7 +28,7 @@ Skills, AGENTS.md/CLAUDE.md and steering work as usual.
 
 ## Configure
 
-Optional. Global: `~/.pi/agent/claude-bridge.json`. Per project: `.pi/claude-bridge.json`, merged over the global file, except `provider`: its options are read from the global file only, so a cloned repository cannot change them.
+Optional. Global: `~/.pi/agent/claude-bridge.json`. A `.pi/claude-bridge.json` inside a project is ignored, so a cloned repository cannot change these options.
 
 ```json
 {
@@ -46,7 +46,7 @@ Optional. Global: `~/.pi/agent/claude-bridge.json`. Per project: `.pi/claude-bri
 | `strictMcpConfig` | `true` | Ignore MCP servers from `~/.claude.json` and `.mcp.json`. |
 | `autoMemoryEnabled` | `false` | Turn on Claude Code's auto-memory. |
 | `pathToClaudeCodeExecutable` | bundled | Path to your own `claude` binary (e.g. on Nix). |
-| `loadClaudeSettings` | `"user"` | Which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` loads `~/.claude/settings.json` only. `"all"` also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`: use it only in repositories you trust. `false` loads none, which cuts tokens and latency. |
+| `loadClaudeSettings` | `"user"` | Which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` loads `~/.claude/settings.json` only. `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`: use it only in repositories you trust. `false` loads none, which cuts tokens and latency. |
 | `rateLimitWarnings` | `true` | Set `false` to hide the rate-limit warnings and reset-time notices. |
 
 Context window: Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 always run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. Any other model runs at 200K until its 1M context is measured and added to the bridge.

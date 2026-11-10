@@ -16,7 +16,7 @@ import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
-import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
+import { askClaudeSettingSources, rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
@@ -2671,7 +2671,7 @@ async function promptAndWait(
 			// without the tool and permission guidance the bridge relies on everywhere else.
 			// Whether pi has skills to append is unrelated to whether the child needs that.
 			systemPrompt: { type: "preset", preset: "claude_code", append: skillsBlock },
-			settingSources: ["user", "project"] as SettingSource[],
+			settingSources: askClaudeSettingSources(providerSettings),
 			extraArgs,
 			...(resumeSessionId ? { resume: resumeSessionId } : {}),
 			...(options?.isolated ? { persistSession: false } : {}),

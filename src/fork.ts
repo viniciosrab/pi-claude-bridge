@@ -48,6 +48,14 @@ export function providerSettingSourcesOption(provider?: object): { settingSource
 	return { settingSources: ["user"] };
 }
 
+/** AskClaude's `settingSources`. It runs Claude Code's own tools, so it keeps the user's
+ *  settings whatever the provider option says, and reads the repository's project settings
+ *  only when `loadClaudeSettings` is `"all"` (or `true`), for the same reason as above. */
+export function askClaudeSettingSources(provider?: object): SettingSource[] {
+	const choice = forkSettings(provider).loadClaudeSettings;
+	return choice === true || choice === "all" ? ["user", "project"] : ["user"];
+}
+
 /** Wrap the SDK's query() so provider launches get providerSettingSourcesOption. Hooked
  *  where src/index.ts assigns queryImpl, which upstream leaves alone, rather than in the
  *  provider block it keeps rewriting. Provider launches run Claude Code with `tools: []`

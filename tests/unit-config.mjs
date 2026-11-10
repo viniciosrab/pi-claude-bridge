@@ -35,7 +35,7 @@ describe("claudeCodeSettings", () => {
 });
 
 describe("loadConfig", () => {
-	it("loads project askClaude config from Pi's configured project directory and ignores its provider config", () => withTempHome(() => {
+	it("ignores a project's provider and askClaude config", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
 			const configDir = join(cwd, CONFIG_DIR_NAME);
@@ -49,14 +49,14 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				askClaudeDeprecationShown: undefined,
 				provider: {},
-				askClaude: { enabled: false },
+				askClaude: {},
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	}));
 
-	it("merges project askClaude config over global config and keeps the global provider config", () => withTempHome((home) => {
+	it("keeps the global provider and askClaude config when a project sets its own", () => withTempHome((home) => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
 			const globalDir = getAgentDir();
@@ -76,7 +76,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				askClaudeDeprecationShown: undefined,
 				provider: { plan: "pro", strictMcpConfig: true },
-				askClaude: { enabled: false, defaultMode: "read" },
+				askClaude: { enabled: true, defaultMode: "read" },
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
