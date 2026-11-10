@@ -215,6 +215,31 @@ export class PromptCaptures {
 		return this.captures.size;
 	}
 
+	/** Whether this exact key is live. Does not touch recency. */
+	has(systemPrompt: string): boolean {
+		return this.captures.has(systemPrompt);
+	}
+
+	/** The captures behind these keys and every capture they inherit, ancestors first and
+	 *  each once, so re-recording them in order rebuilds the same inheritance edges in
+	 *  another registry. Unknown keys are skipped. Does not touch recency. */
+	lineage(keys: Iterable<string>): PromptCapture[] {
+		const reachable = this.reachableCaptures();
+		const result: PromptCapture[] = [];
+		const seen = new Set<PromptCapture>();
+		const visit = (capture: PromptCapture): void => {
+			if (seen.has(capture)) return;
+			seen.add(capture);
+			for (const edge of capture.inherited) visit(edge.parent);
+			result.push(capture);
+		};
+		for (const key of keys) {
+			const capture = this.captures.get(key) ?? reachable.find((node) => node.assembledPrompt === key);
+			if (capture) visit(capture);
+		}
+		return result;
+	}
+
 	/** Longest shared-prefix matches, best first, for the throw diagnostic. */
 	private closestKnown(systemPrompt: string): { key: string; firstDivergent: number; source?: string }[] {
 		let shared = 0;

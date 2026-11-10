@@ -731,7 +731,7 @@ function forkParents(): Map<string, string> {
 
 /** The id in a pi session file's header line, its first. Reads only the file's head:
  *  a session file holds the whole conversation. */
-function piSessionFileId(file: string): string | undefined {
+export function piSessionFileId(file: string): string | undefined {
 	let fd: number | undefined;
 	try {
 		fd = openSync(file, "r");

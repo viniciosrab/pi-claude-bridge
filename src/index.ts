@@ -17,6 +17,7 @@ import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSetti
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { askClaudeSettingSources, rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
+import { forgetSessionStore, loadOwnCaptures, loadParentCaptures, persistSessionCapture } from "./prompt-capture-store.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
@@ -2824,6 +2825,15 @@ export default function (pi: ExtensionAPI) {
 		piMode = ctx.mode;
 		rememberSessionCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
 		rememberForkParent(event, ctx.sessionManager.getSessionId()); // fork: fork cache
+		// A session in another process (a pi-subagents background child) may query with
+		// its parent's prompt; load the parent session's stored captures (issue #37).
+		const parentSession = ctx.sessionManager.getHeader?.()?.parentSession;
+		const loaded = loadParentCaptures(parentSession, ctx.sessionManager.getSessionId(), promptCaptures);
+		if (loaded > 0) debug(`session_start: loaded ${loaded} prompt capture${loaded === 1 ? "" : "s"} from parent session ${parentSession}`);
+		// A session resumed in a new process: keep what an earlier process stored for it,
+		// which this process's next write would otherwise replace.
+		const ownLoaded = loadOwnCaptures(ctx.sessionManager.getSessionId(), promptCaptures);
+		if (ownLoaded > 0) debug(`session_start: loaded ${ownLoaded} prompt capture${ownLoaded === 1 ? "" : "s"} stored earlier for this session`);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
@@ -2861,6 +2871,14 @@ export default function (pi: ExtensionAPI) {
 			sections: options?.sections,
 		}, source);
 	}
+	// Stores the captures of a session pi persists, for a session forked from it in
+	// another process (src/prompt-capture-store.ts). A session without a file has no
+	// child that can name it as parentSession.
+	function persistForOtherProcesses(ctx: ExtensionContext | undefined, systemPrompt: string | undefined) {
+		const sessionManager = ctx?.sessionManager;
+		if (!systemPrompt || !sessionManager?.getSessionFile?.()) return;
+		persistSessionCapture(sessionManager.getSessionId(), systemPrompt, promptCaptures);
+	}
 	pi.on("before_agent_start", (event) => {
 		lastSystemPromptOptions = event.systemPromptOptions;
 		recordSystemPrompt("before_agent_start", event.systemPrompt, event.systemPromptOptions);
@@ -2878,7 +2896,9 @@ export default function (pi: ExtensionAPI) {
 	// agent_start also captures a handler-returned forceSystemPrompt, which
 	// buildSystemPrompt renders verbatim.
 	pi.on("agent_start", (_event, ctx) => {
-		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
+		const systemPrompt = ctx.getSystemPrompt();
+		recordSystemPrompt("agent_start", systemPrompt, lastSystemPromptOptions);
+		persistForOtherProcesses(ctx, systemPrompt);
 	});
 
 	// Mid-run re-renders: turn_start fires before every turn (first turn included)
@@ -2889,12 +2909,16 @@ export default function (pi: ExtensionAPI) {
 	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
 	// next before_agent_start — accepted: a stale skills list beats failing the turn.
 	pi.on("turn_start", (_event, ctx) => {
-		recordSystemPrompt("turn_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
+		const systemPrompt = ctx.getSystemPrompt();
+		recordSystemPrompt("turn_start", systemPrompt, lastSystemPromptOptions);
+		persistForOtherProcesses(ctx, systemPrompt);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		forgetSessionCwd(ctx.sessionManager.getSessionId());
 		closeSessionQueries(ctx.sessionManager.getSessionId());
 		clearSession("session_shutdown");
+		const sessionManager = ctx?.sessionManager;
+		if (sessionManager) forgetSessionStore(sessionManager.getSessionId());
 	});
 
 	// Pi and summary extensions own compaction and branch summaries; native calls use the
