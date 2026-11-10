@@ -107,7 +107,8 @@ export function collectCarriedAttachments(records: readonly JsonlRecord[]): Carr
  * The ordinal is where the search starts, not an exact address: Claude Code stores a
  * turn of several pi user messages as one prompt record, and the bridge's own
  * continuation prompts exist only in its file, so later ordinals drift either way.
- * Prompts are matched in order, so a text that repeats keeps its sequence.
+ * Prompts are matched in order, and a text that more than one remaining prompt
+ * carries is dropped as ambiguous rather than guessed.
  */
 export function placeCarriedAttachments(
 	carried: readonly CarriedAttachment[],
@@ -132,7 +133,17 @@ export function placeCarriedAttachments(
 		let pos = -1;
 		if (item.userOrdinal === lastOrdinal && lastPos !== -1) pos = lastPos;
 		else if (item.userOrdinal > lastPos && prompts[item.userOrdinal]?.text === item.parentText) pos = item.userOrdinal;
-		else pos = prompts.findIndex((p, i) => i > lastPos && p.text === item.parentText);
+		else {
+			// Off its ordinal, a text is trusted only when exactly one prompt after the last
+			// match carries it: picking between equal prompts could move the file to a turn
+			// that never saw it.
+			const matches = prompts.flatMap((p, i) => (i > lastPos && p.text === item.parentText ? [i] : []));
+			if (matches.length > 1) {
+				skipped.push(`${name}: prompt #${item.userOrdinal} matches ${matches.length} prompts`);
+				continue;
+			}
+			pos = matches[0] ?? -1;
+		}
 		if (pos === -1) {
 			skipped.push(prompts[item.userOrdinal]
 				? `${name}: prompt #${item.userOrdinal} changed`

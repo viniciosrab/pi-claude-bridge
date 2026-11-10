@@ -111,6 +111,21 @@ describe("placeCarriedAttachments", () => {
 		assert.deepEqual(attachments, [{ afterIndex: 2, attachment: shifted[0].attachment }]);
 	});
 
+	// The text search must not pick between equal prompts: here CC's file held a prompt pi
+	// does not (the bridge's own continuation), so the attachment's ordinal is past pi's
+	// end, and either "look @x" could be its parent. Attaching it to the wrong one tells
+	// the model it saw the file at a point it did not, so the attachment is dropped.
+	it("drops an attachment whose text matches more than one prompt", () => {
+		const ambiguous = [{ attachment: { type: "file", filename: "/x" }, userOrdinal: 2, parentText: "look @x" }];
+		const { attachments, skipped } = placeCarriedAttachments(ambiguous, [
+			{ role: "user", content: "look @x" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "look @x" },
+		]);
+		assert.deepEqual(attachments, []);
+		assert.match(skipped[0], /\/x: prompt #2 matches 2 prompts/);
+	});
+
 	it("keeps repeated prompt texts in order", () => {
 		const file = (filename, userOrdinal) => ({ attachment: { type: "file", filename }, userOrdinal, parentText: "look @x" });
 		const both = [file("/one", 0), file("/two", 2)];
