@@ -22,8 +22,8 @@ import type { query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 type Query = ReturnType<typeof query>;
 
 /** Wrap the SDK's query() so provider launches log their timing through `log`.
- *  Provider launches stream their prompt; the isolated summary and AskClaude pass a
- *  string and go through untouched. The returned Query is the SDK's own object: only
+ *  Provider launches stream their prompt; the isolated summary passes a
+ *  string and goes through untouched. The returned Query is the SDK's own object: only
  *  its async iterator is wrapped, so its methods and identity stay as they were. */
 export function withTurnTiming(impl: typeof query, log: (line: string) => void): typeof query {
 	let timedQueries = 0;

@@ -4,16 +4,13 @@
 // preserves conversation context (all messages are flattened into
 // each query, so "missed" messages are automatically included).
 //
-// Also tests AskClaude shared mode (sees conversation history) vs
-// isolated mode (clean slate).
-//
 // Requires: pi CLI, Claude Code (for Agent SDK subprocess).
 // Requires: CLAUDE_BRIDGE_TESTING_ALT_PROVIDER (e.g. "minimax")
 // Requires: CLAUDE_BRIDGE_TESTING_ALT_MODEL (e.g. "MiniMax-M2.7-highspeed")
 
 console.log("=== session-resume-test.mjs ===");
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRpcHarness, requireEnv } from "./lib/rpc-harness.mjs";
@@ -28,44 +25,21 @@ const BRIDGE_MODEL = "claude-bridge/claude-haiku-4-5";
 const WORD_A = `alpha${Math.random().toString(36).slice(2, 6)}`;
 const WORD_B = `beta${Math.random().toString(36).slice(2, 6)}`;
 const WORD_C = `gamma${Math.random().toString(36).slice(2, 6)}`;
-// The AskClaude turns run after the first provider exchange only: once the
-// transcript holds a second "recall the words" exchange, the API refuses the
-// request ("safeguards flagged this message" / "[reasoning_extraction]")
-// regardless of how the question is phrased. This code is stated only by the
-// user, so it tests shared context without the assistant reproducing its own
-// prior output.
-const CODE = `code${Math.random().toString(36).slice(2, 6)}`;
 
 const TEST_CWD_PREFIX = join(tmpdir(), "pi-claude-bridge-session-resume-");
 const TEST_CWD = mkdtempSync(TEST_CWD_PREFIX);
-// AskClaude is read from the global config only; supply one without replacing pi's agent dir.
-const BRIDGE_CONFIG = join(TEST_CWD, "claude-bridge.json");
-writeFileSync(BRIDGE_CONFIG, '{"askClaude":{"enabled":true}}\n');
 
 // Use harness but with custom args - start on non-provider model
 const harness = createRpcHarness({
 	name: "session-resume",
 	args: ["--model", `${OTHER_PROVIDER}/${OTHER_MODEL}`],
 	cwd: TEST_CWD,
-	env: { CLAUDE_BRIDGE_CONFIG: BRIDGE_CONFIG },
 	defaultTimeout: TIMEOUT,
 });
 
 const { startAndWait, stop, send, addListener, collectText, DEBUG_LOG, RPC_LOG } = harness;
 
-let lastToolResult = null;
-let lastToolArgs = null;
-
-// The AskClaude turns below depend on what the *calling* model chose to put in
-// the tool's prompt, which we do not control. Both assertions are only meaningful
-// when the prompt does not already contain the word being asked about: with the
-// answer embedded, isolated mode echoes it (false failure) and shared mode returns
-// it without consulting history (false pass). Capturing the args is what lets each
-// turn tell those apart instead of guessing from the response alone.
-const promptContains = (word) => JSON.stringify(lastToolArgs ?? {}).toLowerCase().includes(word);
-
-// Custom waitForIdle that captures the last tool result and its call args
-// (harness doesn't do this)
+// Resolves on the next agent_end.
 function waitForIdle(timeout = TIMEOUT) {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("Timeout waiting for idle")), timeout);
@@ -73,17 +47,6 @@ function waitForIdle(timeout = TIMEOUT) {
 			if (msg.type === "agent_end") {
 				clearTimeout(timer);
 				remove();
-				const calls = (msg.messages ?? [])
-					.filter((m) => m.role === "assistant")
-					.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
-					.filter((b) => b?.type === "toolCall");
-				lastToolArgs = calls.length ? calls[calls.length - 1].arguments : null;
-				// Extract last tool result text for assertion
-				const toolResults = msg.messages?.filter((m) => m.role === "toolResult") ?? [];
-				if (toolResults.length > 0) {
-					const last = toolResults[toolResults.length - 1];
-					lastToolResult = last.content?.map((c) => c.text ?? "").join("") ?? "";
-				}
 				resolve(msg);
 			}
 		});
@@ -103,7 +66,7 @@ await startAndWait();
 try {
   // Turn 1: Non-provider prompt — establishes context before our provider is used
   console.log("Turn 1: Non-provider prompt (establish context)...");
-  const text1 = await promptAndWait(`The first word is '${WORD_A}'. The access code is '${CODE}'. Acknowledge and be very brief.`);
+  const text1 = await promptAndWait(`The first word is '${WORD_A}'. Acknowledge and be very brief.`);
   if (!text1) throw new Error("Turn 1 produced no text");
   console.log(`  Response: ${text1.slice(0, 80)}`);
 
@@ -123,51 +86,43 @@ try {
   if (!lower2.includes(WORD_A)) throw new Error(`Turn 2 response missing '${WORD_A}': ${text2}`);
   if (!lower2.includes(WORD_B)) throw new Error(`Turn 2 response missing '${WORD_B}': ${text2}`);
 
-  // Turn 3: AskClaude shared mode — should see CODE, which the non-provider model was told
   console.log(`Switching to ${OTHER_PROVIDER}/${OTHER_MODEL}...`);
   await send({ type: "set_model", provider: OTHER_PROVIDER, modelId: OTHER_MODEL });
 
-  console.log("Turn 3: AskClaude shared mode (should see non-provider context)...");
-  const text3 = await promptAndWait(
-    'Use the AskClaude tool with prompt="What is the access code? Reply with just the code."'
-  );
-  console.log(`  AskClaude args: ${JSON.stringify(lastToolArgs)}`);
-  console.log(`  AskClaude result: ${(lastToolResult || "").slice(0, 120)}`);
-  if (promptContains(CODE)) {
-    console.log(`  INCONCLUSIVE: ${OTHER_MODEL} put '${CODE}' in the prompt, so a correct answer proves nothing about shared context`);
-  } else if (!lastToolResult?.toLowerCase().includes(CODE)) {
-    throw new Error(`Turn 3 AskClaude tool result missing '${CODE}': ${lastToolResult}`);
-  }
-
-  // Turn 4: AskClaude isolated mode — should NOT see conversation history
-  console.log("Turn 4: AskClaude isolated mode (should not see context)...");
-  lastToolResult = null;
-  const text4 = await promptAndWait(
-    'Use the AskClaude tool with prompt="What is the access code? If you don\'t know, say UNKNOWN." and isolated=true'
-  );
-  console.log(`  AskClaude args: ${JSON.stringify(lastToolArgs)}`);
-  console.log(`  AskClaude result: ${(lastToolResult || "").slice(0, 120)}`);
-  if (promptContains(CODE)) {
-    // The ~1-in-5 flake: isolated CC is echoing a code it was handed, not one it
-    // recovered from a session it should not have seen.
-    console.log(`  INCONCLUSIVE: ${OTHER_MODEL} put '${CODE}' in the prompt, so isolation cannot be judged from the response`);
-  } else if (lastToolResult?.toLowerCase().includes(CODE)) {
-    throw new Error(`Turn 4 isolated AskClaude should not know '${CODE}' (not in its prompt, so this is a real context leak): ${lastToolResult}`);
-  }
-
-  // Turn 5: Non-provider prompt — adds context that provider must see on switch-back
-  console.log("Turn 5: Non-provider prompt (creates missed messages)...");
-  const text5 = await promptAndWait(`The third word is '${WORD_C}'. Acknowledge and be very brief.`);
-  if (!text5) throw new Error("Turn 5 produced no text");
-  console.log(`  Response: ${text5.slice(0, 80)}`);
+  // Turn 3: Non-provider prompt — adds context that provider must see on switch-back
+  console.log("Turn 3: Non-provider prompt (creates missed messages)...");
+  const text3 = await promptAndWait(`The third word is '${WORD_C}'. Acknowledge and be very brief.`);
+  if (!text3) throw new Error("Turn 3 produced no text");
+  console.log(`  Response: ${text3.slice(0, 80)}`);
 
   // Switch back to provider — context includes all prior turns (Case 4)
   console.log(`Switching back to ${BRIDGE_MODEL}...`);
   await send({ type: "set_model", provider: bridgeProvider, modelId: bridgeModelId });
 
 
-  // Turn 6: Provider resumes with missed messages (Case 4)
-  console.log("Turn 6: Provider resume with missed messages (Case 4)...");
+  // Turn 4: Provider resumes with missed messages (Case 4)
+  console.log("Turn 4: Provider resume with missed messages (Case 4)...");
+  const text4 = await promptAndWait(
+    "What were all three words? Reply with just the three words separated by commas."
+  );
+  console.log(`  Response: ${text4.slice(0, 80)}`);
+  const lower4 = text4.toLowerCase();
+  if (!lower4.includes(WORD_A)) throw new Error(`Turn 4 response missing '${WORD_A}': ${text4}`);
+  if (!lower4.includes(WORD_B)) throw new Error(`Turn 4 response missing '${WORD_B}': ${text4}`);
+  if (!lower4.includes(WORD_C)) throw new Error(`Turn 4 response missing '${WORD_C}': ${text4}`);
+
+  // Turn 5: Abort mid-stream — session should be invalidated, next turn should recover
+  console.log("Turn 5: Abort mid-stream (session recovery)...");
+  await send({ type: "prompt", message: "Write a detailed 500-word essay about the history of timekeeping." });
+  // Set up idle listener before abort so we don't miss agent_end
+  const idle5 = waitForIdle();
+  await new Promise((r) => setTimeout(r, 2000));
+  await send({ type: "abort" });
+  await idle5;
+
+
+  // Turn 6: Provider turn after abort — should NOT get "conversation not found"
+  console.log("Turn 6: Provider turn after abort (should recover)...");
   const text6 = await promptAndWait(
     "What were all three words? Reply with just the three words separated by commas."
   );
@@ -177,29 +132,8 @@ try {
   if (!lower6.includes(WORD_B)) throw new Error(`Turn 6 response missing '${WORD_B}': ${text6}`);
   if (!lower6.includes(WORD_C)) throw new Error(`Turn 6 response missing '${WORD_C}': ${text6}`);
 
-  // Turn 7: Abort mid-stream — session should be invalidated, next turn should recover
-  console.log("Turn 7: Abort mid-stream (session recovery)...");
-  await send({ type: "prompt", message: "Write a detailed 500-word essay about the history of timekeeping." });
-  // Set up idle listener before abort so we don't miss agent_end
-  const idle7 = waitForIdle();
-  await new Promise((r) => setTimeout(r, 2000));
-  await send({ type: "abort" });
-  await idle7;
-
-
-  // Turn 8: Provider turn after abort — should NOT get "conversation not found"
-  console.log("Turn 8: Provider turn after abort (should recover)...");
-  const text8 = await promptAndWait(
-    "What were all three words? Reply with just the three words separated by commas."
-  );
-  console.log(`  Response: ${text8.slice(0, 80)}`);
-  const lower8 = text8.toLowerCase();
-  if (!lower8.includes(WORD_A)) throw new Error(`Turn 8 response missing '${WORD_A}': ${text8}`);
-  if (!lower8.includes(WORD_B)) throw new Error(`Turn 8 response missing '${WORD_B}': ${text8}`);
-  if (!lower8.includes(WORD_C)) throw new Error(`Turn 8 response missing '${WORD_C}': ${text8}`);
-
   // sessionId stability: normal rebuilds (Case 2 → Case 4) keep the session id. After
-  // the abort (Turn 7) the bridge recovers one of two ways (postAbortSync in src/fork.ts):
+  // the abort (Turn 5) the bridge recovers one of two ways (postAbortSync in src/fork.ts):
   // it resumes the session the killed CLI finished, keeping the prompt cache, or, when
   // the abort landed before Claude Code saved the prompt, it rebuilds on a fresh id.
   // Either is correct; exactly one of them must happen, and only a rebuild adds an id.
@@ -223,7 +157,7 @@ try {
   console.log(`FAIL: ${e.message}\n${e.stack}`);
   console.log(`  RPC log:    ${RPC_LOG}`);
   console.log(`  Debug log:  ${DEBUG_LOG}`);
-  console.log(`  CC CLI:     ${join(dirname(DEBUG_LOG), "cc-cli-logs")} (look for *-askclaude-*.log near the failing turn)`);
+  console.log(`  CC CLI:     ${join(dirname(DEBUG_LOG), "cc-cli-logs")} (look for *-provider-*.log near the failing turn)`);
 } finally {
   await stop();
   if (TEST_CWD.startsWith(TEST_CWD_PREFIX) && TEST_CWD.length > TEST_CWD_PREFIX.length) {

@@ -4,7 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { FORK_CHILD_ENV, applyForkChildEnv, askClaudeSettingSources, providerSettingSourcesOption, rateLimitNoticesEnabled, withProviderSettingSources, withRateLimitNoticeFilter } from "../src/fork.js";
+import { FORK_CHILD_ENV, applyForkChildEnv, providerSettingSourcesOption, rateLimitNoticesEnabled, withProviderSettingSources, withRateLimitNoticeFilter } from "../src/fork.js";
 
 describe("providerSettingSourcesOption", () => {
 	it("loads only the user's settings when unset", () => {
@@ -20,21 +20,6 @@ describe("providerSettingSourcesOption", () => {
 
 	it("disables every setting source when loadClaudeSettings is false", () => {
 		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: false }), { settingSources: [] });
-	});
-});
-
-describe("askClaudeSettingSources", () => {
-	it("loads only the user's settings unless the repository's were asked for", () => {
-		assert.deepEqual(askClaudeSettingSources(), ["user"]);
-		assert.deepEqual(askClaudeSettingSources({}), ["user"]);
-		assert.deepEqual(askClaudeSettingSources({ loadClaudeSettings: "user" }), ["user"]);
-		// false is a provider-path option; AskClaude keeps the user's settings as before.
-		assert.deepEqual(askClaudeSettingSources({ loadClaudeSettings: false }), ["user"]);
-	});
-
-	it("adds the project settings it always loaded when loadClaudeSettings is \"all\" or true", () => {
-		assert.deepEqual(askClaudeSettingSources({ loadClaudeSettings: "all" }), ["user", "project"]);
-		assert.deepEqual(askClaudeSettingSources({ loadClaudeSettings: true }), ["user", "project"]);
 	});
 });
 
@@ -62,7 +47,7 @@ describe("withProviderSettingSources", () => {
 		assert.equal(seen, params);
 	});
 
-	it("leaves AskClaude launches (Claude Code's own tools) alone", () => {
+	it("leaves a launch with Claude Code's own tools alone", () => {
 		const options = { settingSources: ["user"] };
 		const { params, seen } = launch({ loadClaudeSettings: false }, options);
 		assert.equal(seen, params);

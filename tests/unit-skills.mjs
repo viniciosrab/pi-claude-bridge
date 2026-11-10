@@ -21,7 +21,7 @@ describe("skills block rendering", () => {
 		assert.match(result, /<location>\/skills\/browser\/SKILL\.md<\/location>/);
 	});
 
-	it("keeps the native read-tool instruction for AskClaude", () => {
+	it("names no MCP tool for the native reader", () => {
 		const result = renderSkillsBlock([skill("browser")], "native");
 		assert.match(result, /Use the read tool to load/);
 		assert.doesNotMatch(result, /mcp__custom-tools__read/);

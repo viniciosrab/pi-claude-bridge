@@ -12,11 +12,10 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
    shorter-context branch in `syncSharedSession` is also the guard that stops a
    subagent resuming and overwriting the parent's session, and a subagent's priors
    are not empty. `isReentrant` is computed immediately before the main
-   `syncSharedSession` call (`src/index.ts:1642`; AskClaude's at `:1903`) and just
-   isn't passed in. The stale `fix/issue-30-pruned-history` branch discriminates on
+   `syncSharedSession` call (`src/index.ts:1642`) and just isn't
+   passed in. The stale `fix/issue-30-pruned-history` branch discriminates on
    `priorMessages.length === 0` and would break subagent isolation -- do not merge
-   it. Decide deliberately what the AskClaude caller should pass. Guarded by
-   `unit-sync-shared-session.mjs` plus `int-subagent-rpiv-codebase-locator.mjs`.
+   it. Guarded by `unit-sync-shared-session.mjs` plus `int-subagent-rpiv-codebase-locator.mjs`.
 
 2. **Synthetic all-zero usage overwrites real counters.** A `<synthetic>` failure
    message carries all-zero usage, and `recordUsage`/`updateUsage` (`src/usage.ts`)
@@ -69,33 +68,27 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
 10. **Handler timeout / stall watchdog** -- whether the bridge should give up on an
    MCP handler that has waited implausibly long instead of only warning.
 
-11. **Markdown rendering** in expanded tool result view. Currently plain text.
-   Use `Markdown` from `@earendil-works/pi-tui` with a `MarkdownTheme`.
-
-12. **`/claude config` slash command** for runtime configuration. Currently
+11. **`/claude config` slash command** for runtime configuration. Currently
     requires editing JSON and `/reload`.
 
-13. **`/claude:btw` command** for ephemeral questions: response displayed but
+12. **`/claude:btw` command** for ephemeral questions: response displayed but
     not added to LLM context.
 
-14. **Audit tool parameter mismatches**: The bash timeout default (120s) was added
+13. **Audit tool parameter mismatches**: The bash timeout default (120s) was added
     because pi's bash has no default while Claude Code expects one. Other bridged
     tools may have similar mismatches (units, defaults, optional-vs-required params).
     Compare Claude Code's tool schemas against pi's for read, write, edit, grep, find.
 
-15. **AskUserQuestion pi shim** (main provider only): CC never sees
-    AskUserQuestion (it's in `DISALLOWED_BUILTIN_TOOLS`), so it can't ask the
+14. **AskUserQuestion pi shim**: CC never sees AskUserQuestion (it's in `DISALLOWED_BUILTIN_TOOLS`), so it can't ask the
     user questions interactively. Port a pi-native version using `ctx.ui.custom()`
-    for an option picker with free-text fallback. Not applicable to AskClaude
-    subagents (can't interact with user). See `fractary/pi-claude-code`
+    for an option picker with free-text fallback. See `fractary/pi-claude-code`
     `AskUserQuestion.ts` for reference.
 
-16. **PlanMode pi shim** (main provider only): Similarly, EnterPlanMode/
+15. **PlanMode pi shim**: Similarly, EnterPlanMode/
     ExitPlanMode are blocked. A pi-native plan mode could use
     `pi.setActiveTools()` to restrict to read-only tools, block destructive bash
-    via `tool_call` event, and surface plan approval through pi's TUI. Not
-    applicable to AskClaude subagents. See `fractary/pi-claude-code`
-    `PlanMode.ts`.
+    via `tool_call` event, and surface plan approval through pi's TUI. See
+    `fractary/pi-claude-code` `PlanMode.ts`.
 
 ## Open questions
 

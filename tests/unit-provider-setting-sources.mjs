@@ -139,32 +139,3 @@ describe("isolated summary settingSources", () => {
 		assert.deepEqual(seen.settingSources, []);
 	});
 });
-
-describe("AskClaude settingSources", () => {
-	async function askClaudeOptions(config) {
-		register(config);
-		let seen;
-		mod.__test.setAskClaudeQuery(({ options }) => {
-			seen = options;
-			const gen = (async function* () { yield { type: "result", subtype: "success", is_error: false, result: "answer" }; })();
-			gen.interrupt = async () => {};
-			gen.close = () => {};
-			return gen;
-		});
-		try {
-			await mod.__test.promptAndWait("hi", "read", new Map(), undefined, { isolated: true, appendSkills: false });
-		} finally {
-			mod.__test.setAskClaudeQuery(null);
-		}
-		assert.ok(seen, "AskClaude never called query()");
-		return seen;
-	}
-
-	it("is the user's settings only by default", async () => {
-		assert.deepEqual((await askClaudeOptions({ provider: {} })).settingSources, ["user"]);
-	});
-
-	it("adds the repository's project settings when loadClaudeSettings is \"all\"", async () => {
-		assert.deepEqual((await askClaudeOptions({ provider: { loadClaudeSettings: "all" } })).settingSources, ["user", "project"]);
-	});
-});
