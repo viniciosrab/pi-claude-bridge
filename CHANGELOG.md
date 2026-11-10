@@ -1,5 +1,11 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: `--thinking off` turns thinking off (upstream #152)** — pi sends no reasoning level when thinking is off, so Claude Code applied its own default and kept thinking on. The provider and one-off paths now pass `thinking: { type: "disabled" }`, like pi-ai's Anthropic provider, except on models whose `thinkingLevelMap` marks `off` unsupported.
+- **Fix: Claude Code no longer adds "The user hasn't heard from you in a while" reminders** — every Claude Code child runs with `CLAUDE_CODE_SILENT_TURN_REMINDER=0`; the message was not in pi's history and the user never saw it.
+- **Fix: environment leaks to and from Claude Code (upstream #198)** — `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set only for Claude Code, not on pi's own process, so commands pi runs no longer inherit it. When pi is started from inside a Claude Code session, that session's markers (entrypoint, session id, env file, IDE port) no longer reach the bridge's Claude Code.
+
 ## 1.0.0 — 2026-11-09
 
 - **Add: Fable 5.2 runs with 1M context** — pi-ai 1.5.1 lists `claude-fable-5-2` with a 1M window, but the bridge sent its bare id, which Claude Code 2.1.308 serves at 200K, so pi registered it at 200K. It now joins the measured-1M set and is sent as `claude-fable-5-2[1m]`, which served 1M on Pro without Extra Usage under both Claude Code 2.1.308 and 2.1.321 (`diag/CONTEXT-SIZE.md`). Its output reaches 128K with the bundled Claude Code 2.1.321 (see the SDK bump below); earlier versions do not know the model and cap it at 32K.

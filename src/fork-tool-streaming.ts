@@ -13,7 +13,7 @@
 export const TOOL_STREAMING_ENV = "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING";
 
 /** Turn eager tool input streaming on in pi's own environment unless the user set it.
- *  Every Claude Code child the bridge spawns gets `{ ...process.env, ...CC_CHILD_ENV }`,
+ *  Every Claude Code child the bridge spawns gets `ccChildEnv()` (pi's environment plus CC_CHILD_ENV),
  *  so this reaches all of them without editing CC_CHILD_ENV, which upstream owns. A user
  *  value wins, so exporting `0` turns it off. */
 export function applyToolStreamingEnv(env: NodeJS.ProcessEnv = process.env): void {
