@@ -81,6 +81,50 @@ describe("placeCarriedAttachments", () => {
 		assert.equal(attachments.length, 0);
 		assert.match(skipped[0], /no longer in history/);
 	});
+
+	// Claude Code stores a turn of two pi user messages as one prompt record ("A\nB"), so
+	// every later prompt sits one ordinal lower in its file than in pi's history.
+	it("finds the prompt after a turn pi holds as two messages and CC as one", () => {
+		const shifted = [{ attachment: { type: "file", filename: "/a.js" }, userOrdinal: 2, parentText: "review @a.js" }];
+		const { attachments, skipped } = placeCarriedAttachments(shifted, [
+			{ role: "user", content: "first" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "A" },
+			{ role: "user", content: "B" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "review @a.js" },
+		]);
+		assert.deepEqual(skipped, []);
+		assert.deepEqual(attachments, [{ afterIndex: 5, attachment: shifted[0].attachment }]);
+	});
+
+	// A prompt Claude Code has and pi does not (the bridge's own "[continue]") moves the
+	// other way: later prompts sit one ordinal higher in CC's file.
+	it("finds the prompt after one only Claude Code's file holds", () => {
+		const shifted = [{ attachment: { type: "file", filename: "/a.js" }, userOrdinal: 2, parentText: "review @a.js" }];
+		const { attachments, skipped } = placeCarriedAttachments(shifted, [
+			{ role: "user", content: "first" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "review @a.js" },
+		]);
+		assert.deepEqual(skipped, []);
+		assert.deepEqual(attachments, [{ afterIndex: 2, attachment: shifted[0].attachment }]);
+	});
+
+	it("keeps repeated prompt texts in order", () => {
+		const file = (filename, userOrdinal) => ({ attachment: { type: "file", filename }, userOrdinal, parentText: "look @x" });
+		const both = [file("/one", 0), file("/two", 2)];
+		const { attachments, skipped } = placeCarriedAttachments(both, [
+			{ role: "user", content: "look @x" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "A" },
+			{ role: "user", content: "B" },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+			{ role: "user", content: "look @x" },
+		]);
+		assert.deepEqual(skipped, []);
+		assert.deepEqual(attachments.map((a) => [a.attachment.filename, a.afterIndex]), [["/one", 0], ["/two", 5]]);
+	});
 });
 
 describe("session request-audit records", () => {
