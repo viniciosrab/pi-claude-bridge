@@ -49,9 +49,9 @@ Optional. Global: `~/.pi/agent/claude-bridge.json`. Per project: `.pi/claude-bri
 | `loadClaudeSettings` | `true` | Set `false` to skip Claude Code's `settings.json` hooks and plugins on each turn. That cuts tokens and latency, but it also drops `env` and `apiKeyHelper` from those settings. |
 | `rateLimitWarnings` | `true` | Set `false` to hide the rate-limit warnings and reset-time notices. |
 
-Context window: Fable 5/5.1, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 always run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. Any other model runs at 200K until its 1M context is measured and added to the bridge.
+Context window: Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 always run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. Any other model runs at 200K until its 1M context is measured and added to the bridge.
 
-Plan access is separate: on Pro, Fable needs Extra Usage.
+Plan access is separate: on Pro, Fable 5 and 5.1 need Extra Usage (Fable 5.2 answered without it when measured on 2026-11-09).
 
 ## Troubleshooting
 
