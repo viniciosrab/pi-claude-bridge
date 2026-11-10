@@ -1,7 +1,7 @@
 /**
  * Tests for MODELS construction.
- * Pins: catalog-driven picker excludes pi-ai's dated snapshot aliases, family
- * shortcuts resolve newest-first regardless of sort order, projection strips
+ * Pins: catalog-driven picker excludes pi-ai's dated snapshot aliases, models
+ * display newest-first within each family, projection strips
  * pi-ai's baseUrl/api/provider/headers, and the runtime policy gates [1m] ids
  * on measurement and plan settings.
  */
@@ -54,12 +54,12 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), ["claude-opus-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5"]);
 	});
 
-	it("keeps dated aliases from stealing shortcuts from bare ids", () => {
+	it("lists the bare id and drops its dated aliases", () => {
 		const models = buildModels([mockPiAiModel("claude-opus-4-5-20251101"), mockPiAiModel("claude-opus-4-5")]);
 		assert.deepEqual(models.map((m) => m.id), ["claude-opus-4-5"]);
 	});
 
-	it("sinks unknown families below the known shortcut families", () => {
+	it("sinks unknown families below the known families", () => {
 		const models = buildModels([oneM("claude-proxy-x"), oneM("claude-opus-5")]);
 		assert.deepEqual(models.map((m) => m.id), ["claude-opus-5", "claude-proxy-x"]);
 	});
