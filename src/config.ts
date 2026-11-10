@@ -9,8 +9,8 @@
 // returned) so the extension always starts.
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
 
 export interface Config {
 	/** Date (YYYY-MM-DD) the one-time startup notice was shown. Written by the extension, not the user. */
@@ -76,16 +76,35 @@ export function markStartupNoticeShown(): string {
 	}
 	// en-CA renders YYYY-MM-DD in local time; toISOString() would report UTC.
 	const next = { ...existing, startupNoticeShown: new Date().toLocaleDateString("en-CA") };
-	mkdirSync(dirname(path), { recursive: true });
 	// Temp file and rename: writing in place empties the user's config first, and a pi
 	// starting in that moment would read it as unparseable and run without its settings.
 	// The rename lands on the symlink's target, with its permissions, so a config kept in
-	// a dotfiles repo stays linked and a private one stays private.
-	const target = existsSync(path) ? realpathSync(path) : path;
-	const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
-	const tmp = `${target}.${process.pid}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, mode === undefined ? undefined : { mode });
-	renameSync(tmp, target);
+	// a dotfiles repo stays linked and a private one stays private. Best effort, like the
+	// parse failure above: a config that cannot be rewritten only shows the notice again.
+	let tmp: string | undefined;
+	try {
+		const target = writeTarget(path);
+		mkdirSync(dirname(target), { recursive: true });
+		const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
+		tmp = `${target}.${process.pid}.tmp`;
+		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+		// Explicit chmod: writeFileSync's mode is masked by the umask.
+		if (mode !== undefined) chmodSync(tmp, mode);
+		renameSync(tmp, target);
+	} catch (e) {
+		if (tmp) rmSync(tmp, { force: true });
+		console.error(`claude-bridge: could not record the startup notice in ${path}: ${e}`);
+	}
+	return path;
+}
+
+/** The file a rewrite of `path` must replace: the symlink's target when `path` is a link,
+ *  also one whose target does not exist yet, so the rename never replaces the link. */
+function writeTarget(path: string): string {
+	if (existsSync(path)) return realpathSync(path);
+	try {
+		if (lstatSync(path).isSymbolicLink()) return resolve(dirname(path), readlinkSync(path));
+	} catch {}
 	return path;
 }
 

@@ -186,6 +186,52 @@ describe("loadConfig", () => {
 		assert.deepEqual(readdirSync(home).filter((name) => name.endsWith(".tmp")), []);
 	}));
 
+	it("markStartupNoticeShown writes through a dangling config symlink", () => withTempHome((home) => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const real = join(home, "dotfiles-not-yet.json");
+		const link = join(globalDir, "claude-bridge.json");
+		symlinkSync(real, link);
+
+		markStartupNoticeShown();
+
+		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
+		assert.match(JSON.parse(readFileSync(real, "utf-8")).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
+	}));
+
+	it("markStartupNoticeShown keeps the config's mode under a restrictive umask", () => withTempHome(() => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const path = join(globalDir, "claude-bridge.json");
+		writeFileSync(path, "{}");
+		chmodSync(path, 0o644);
+		const oldUmask = process.umask(0o077);
+		try {
+			markStartupNoticeShown();
+		} finally {
+			process.umask(oldUmask);
+		}
+		assert.equal(statSync(path).mode & 0o777, 0o644);
+	}));
+
+	it("markStartupNoticeShown does not throw when the config cannot be rewritten", () => withTempHome((home) => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const lockedDir = join(home, "locked");
+		mkdirSync(lockedDir);
+		const real = join(lockedDir, "claude-bridge.json");
+		writeFileSync(real, JSON.stringify({ provider: { plan: "max" } }));
+		symlinkSync(real, join(globalDir, "claude-bridge.json"));
+		chmodSync(lockedDir, 0o500);
+		try {
+			assert.equal(markStartupNoticeShown(), join(globalDir, "claude-bridge.json"));
+			assert.deepEqual(JSON.parse(readFileSync(real, "utf-8")), { provider: { plan: "max" } });
+			assert.deepEqual(readdirSync(lockedDir), ["claude-bridge.json"]);
+		} finally {
+			chmodSync(lockedDir, 0o700);
+		}
+	}));
+
 	it("markStartupNoticeShown leaves an unparseable config untouched", () => withTempHome(() => {
 		const globalDir = getAgentDir();
 		mkdirSync(globalDir, { recursive: true });
