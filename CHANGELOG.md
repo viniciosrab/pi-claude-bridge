@@ -1,6 +1,6 @@
 # Changelog
 
-## UNRELEASED
+## 1.0.0 — 2026-11-09
 
 - **Add: Fable 5.2 runs with 1M context** — pi-ai 1.5.1 lists `claude-fable-5-2` with a 1M window, but the bridge sent its bare id, which Claude Code 2.1.308 serves at 200K, so pi registered it at 200K. It now joins the measured-1M set and is sent as `claude-fable-5-2[1m]`, which served 1M on Pro without Extra Usage under both Claude Code 2.1.308 and 2.1.321 (`diag/CONTEXT-SIZE.md`). Its output reaches 128K with the bundled Claude Code 2.1.321 (see the SDK bump below); earlier versions do not know the model and cap it at 32K.
 - **Remove: upstream mirror; the project is now developed independently** — `@viniciosrab/pi-claude-bridge` no longer rebuilds each upstream `pi-claude-bridge` release with its fixes; it continues from 0.9.4-fork.13 (upstream 0.9.3 plus this changelog's unreleased fixes) and takes no further upstream commits. `package.json` now carries the scoped name and this repository, a `vX.Y.Z` tag publishes through the new `release.yml` workflow, the user-facing README replaces upstream's (whose details moved to `docs/reference.md`) and credits it at the end, upstream's screenshots leave the package, the npm description no longer advertises the deprecated AskClaude tool, and the session-file warning links to this repository's issues.

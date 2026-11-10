@@ -1,6 +1,6 @@
 {
   "name": "@viniciosrab/pi-claude-bridge",
-  "version": "0.9.4-fork.13",
+  "version": "1.0.0",
   "private": false,
   "description": "Use Claude in pi through your Claude Code subscription, with pi running every tool.",
   "keywords": [
