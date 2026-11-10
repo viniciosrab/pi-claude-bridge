@@ -53,6 +53,28 @@ describe("loadConfig", () => {
 		}
 	}));
 
+	it("treats a config file that is not a JSON object as empty", () => withTempHome((home) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
+		const oldConfig = process.env.CLAUDE_BRIDGE_CONFIG;
+		try {
+			const configDir = join(cwd, CONFIG_DIR_NAME);
+			mkdirSync(configDir, { recursive: true });
+			const globalPath = join(home, "global.json");
+			process.env.CLAUDE_BRIDGE_CONFIG = globalPath;
+			for (const body of ["null", "[]", '"x"', "1"]) {
+				writeFileSync(join(configDir, "claude-bridge.json"), body);
+				writeFileSync(globalPath, body);
+				const config = loadConfig(cwd);
+				assert.deepEqual(config.provider, {}, `provider for ${body}`);
+				assert.equal(config.startupNoticeShown, undefined, `startupNoticeShown for ${body}`);
+			}
+		} finally {
+			if (oldConfig === undefined) delete process.env.CLAUDE_BRIDGE_CONFIG;
+			else process.env.CLAUDE_BRIDGE_CONFIG = oldConfig;
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}));
+
 	it("reads the global config from CLAUDE_BRIDGE_CONFIG when it is set", () => withTempHome((home) => {
 		const path = join(home, "elsewhere.json");
 		writeFileSync(path, JSON.stringify({ provider: { plan: "max" } }));

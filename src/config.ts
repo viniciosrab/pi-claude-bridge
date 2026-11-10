@@ -35,7 +35,11 @@ export interface Config {
 export function tryParseJson(path: string): Partial<Config> {
 	if (!existsSync(path)) return {};
 	try {
-		return JSON.parse(readFileSync(path, "utf-8"));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		// Valid JSON is not necessarily a config: `null` would throw at the first field read.
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Partial<Config>;
+		console.error(`claude-bridge: ignoring ${path}, it is not a JSON object`);
+		return {};
 	} catch (e) {
 		console.error(`claude-bridge: failed to parse ${path}: ${e}`);
 		return {};
