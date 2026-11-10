@@ -15,7 +15,7 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -57,7 +57,9 @@ function ctxFor(sessionManager, prompt) {
 }
 /** A pi session file holding only its header line, as the child's header points at. */
 function sessionFile(id) {
-	const dir = mkdtempSync(join(tmpdir(), "cb-session-"));
+	// Under the test agent dir, which tests/lib/setup.mjs removes on exit.
+	const dir = join(getAgentDir(), "test-sessions");
+	mkdirSync(dir, { recursive: true });
 	const file = join(dir, `${id}.jsonl`);
 	writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id, timestamp: "", cwd: "/" })}\n{"type":"message"}\n`);
 	return file;
