@@ -25,6 +25,8 @@ export function verifyWrittenSession(jsonlPath: string, expectedSessionId: strin
 		warnings.push(`record count mismatch — expected=${expectedRecordCount} actual=${lines.length} path=${jsonlPath} bytes=${content.length}`);
 		return warnings;
 	}
+	// Nothing expected and nothing written: no first record to check.
+	if (lines.length === 0) return warnings;
 	try {
 		const firstRec = JSON.parse(lines[0]);
 		const lastRec = JSON.parse(lines[lines.length - 1]);
