@@ -91,6 +91,11 @@ describe("provider query settingSources", () => {
 		assert.deepEqual(options.settingSources, ["user", "project", "local"]);
 	});
 
+	it("adds project and local settings when loadClaudeSettings is true", async () => {
+		const options = await capturedOptions({ provider: { loadClaudeSettings: true } });
+		assert.deepEqual(options.settingSources, ["user", "project", "local"]);
+	});
+
 	it("is empty when loadClaudeSettings is false", async () => {
 		const options = await capturedOptions({ provider: { loadClaudeSettings: false } });
 		assert.deepEqual(options.settingSources, []);
@@ -111,5 +116,26 @@ describe("provider query settings", () => {
 	it("pins Claude Code's default output style over a user-level one", async () => {
 		const options = await capturedOptions({ provider: {} });
 		assert.equal(options.settings.outputStyle, "default");
+	});
+});
+
+describe("isolated summary settingSources", () => {
+	// Compaction and other one-offs load no settings files, whatever the provider option says.
+	it("stays empty when loadClaudeSettings is \"all\"", async () => {
+		register({ provider: { loadClaudeSettings: "all" } });
+		let seen;
+		setQuery(({ options }) => {
+			seen = options;
+			const gen = (async function* () { yield { type: "result", subtype: "success", is_error: false, result: "summary" }; })();
+			gen.interrupt = async () => {};
+			gen.close = () => {};
+			return gen;
+		});
+		await mod.__test.isolatedStreamFn(
+			provider.model,
+			{ systemPrompt: "Summarize.", messages: [{ role: "user", content: [{ type: "text", text: "Summarize." }], timestamp: 0 }] },
+			{ cacheRetention: "none" },
+		).result();
+		assert.deepEqual(seen.settingSources, []);
 	});
 });

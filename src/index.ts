@@ -2336,7 +2336,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// Suppress claude.ai cloud MCP servers (Figma/Canva/etc. auto-discovered via OAuth
 	// when the user is logged into Anthropic). These are a separate code path from
-	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources=undefined.
+	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources.
 	// The native CC binary gates them on env var ENABLE_CLAUDEAI_MCP_SERVERS: setting it
 	// to "0"/"false"/"no"/"off" makes the loader return early before any cloud fetch.
 	// DISABLE_AUTO_COMPACT=1: pi owns context-management and propagates its own

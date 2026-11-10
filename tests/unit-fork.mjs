@@ -38,8 +38,13 @@ describe("withProviderSettingSources", () => {
 	});
 
 	it("empties settingSources on a provider launch when loadClaudeSettings is false", () => {
-		const { seen } = launch({ loadClaudeSettings: false }, { tools: [], settingSources: ["user"], model: "m" });
+		const { seen } = launch({ loadClaudeSettings: false }, { tools: [], model: "m" });
 		assert.deepEqual(seen.options, { tools: [], settingSources: [], model: "m" });
+	});
+
+	it("leaves a launch that names its own settingSources alone (the isolated summary)", () => {
+		const { params, seen } = launch({ loadClaudeSettings: "all" }, { tools: [], settingSources: [] });
+		assert.equal(seen, params);
 	});
 
 	it("leaves AskClaude launches (Claude Code's own tools) alone", () => {

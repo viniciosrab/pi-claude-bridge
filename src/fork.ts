@@ -51,13 +51,13 @@ export function providerSettingSourcesOption(provider?: object): { settingSource
 /** Wrap the SDK's query() so provider launches get providerSettingSourcesOption. Hooked
  *  where src/index.ts assigns queryImpl, which upstream leaves alone, rather than in the
  *  provider block it keeps rewriting. Provider launches run Claude Code with `tools: []`
- *  (so does the isolated summary, already sourceless); AskClaude keeps CC's own tools and
- *  is left alone. */
+ *  and name no sources of their own. The isolated summary also has `tools: []` but asks
+ *  for no sources, and AskClaude keeps CC's own tools: both are left alone. */
 export function withProviderSettingSources(impl: typeof query, getProvider: () => object | undefined): typeof query {
 	return ((params: Parameters<typeof query>[0]) => {
 		const override = providerSettingSourcesOption(getProvider());
 		const tools = params.options?.tools;
-		if (!Array.isArray(tools) || tools.length > 0) return impl(params);
+		if (!Array.isArray(tools) || tools.length > 0 || params.options?.settingSources) return impl(params);
 		return impl({ ...params, options: { ...params.options, ...override } });
 	}) as typeof query;
 }
