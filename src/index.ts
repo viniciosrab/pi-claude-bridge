@@ -17,7 +17,7 @@ import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSetti
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { askClaudeSettingSources, rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
-import { loadParentCaptures, persistSessionCapture } from "./prompt-capture-store.js";
+import { forgetSessionStore, loadOwnCaptures, loadParentCaptures, persistSessionCapture } from "./prompt-capture-store.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
@@ -2830,6 +2830,10 @@ export default function (pi: ExtensionAPI) {
 		const parentSession = ctx.sessionManager.getHeader?.()?.parentSession;
 		const loaded = loadParentCaptures(parentSession, ctx.sessionManager.getSessionId(), promptCaptures);
 		if (loaded > 0) debug(`session_start: loaded ${loaded} prompt capture${loaded === 1 ? "" : "s"} from parent session ${parentSession}`);
+		// A session resumed in a new process: keep what an earlier process stored for it,
+		// which this process's next write would otherwise replace.
+		const ownLoaded = loadOwnCaptures(ctx.sessionManager.getSessionId(), promptCaptures);
+		if (ownLoaded > 0) debug(`session_start: loaded ${ownLoaded} prompt capture${ownLoaded === 1 ? "" : "s"} stored earlier for this session`);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
@@ -2913,6 +2917,8 @@ export default function (pi: ExtensionAPI) {
 		forgetSessionCwd(ctx.sessionManager.getSessionId());
 		closeSessionQueries(ctx.sessionManager.getSessionId());
 		clearSession("session_shutdown");
+		const sessionManager = ctx?.sessionManager;
+		if (sessionManager) forgetSessionStore(sessionManager.getSessionId());
 	});
 
 	// Pi and summary extensions own compaction and branch summaries; native calls use the

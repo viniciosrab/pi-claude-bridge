@@ -15,13 +15,13 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 const { default: activate, __test } = await import("../src/index.js");
 const { PromptCaptures, projectPromptCapture } = await import("../src/prompt-capture.js");
-const { loadParentCaptures } = await import("../src/prompt-capture-store.js");
+const { loadParentCaptures, loadOwnCaptures, persistSessionCapture } = await import("../src/prompt-capture-store.js");
 
 const AGENTS_MD = "Always answer in haiku.";
 const PARENT_PROMPT = `You are pi.\n# Project Context\n${AGENTS_MD}\n# Tools\n- read\n- subagent`;
@@ -200,5 +200,58 @@ describe("prompt captures across processes (issue #37)", () => {
 		assert.match(projected, /Always answer in haiku\./);
 		assert.match(projected, /be brief/);
 		assert.doesNotMatch(projected, /You are pi\./);
+	});
+
+	it("refreshes the file's mtime for an unchanged prompt, and rewrites a file that was deleted", () => {
+		const id = `alive-${++n}`;
+		const prompt = `You are pi, alive ${n}.`;
+		const registry = new PromptCaptures();
+		registry.record(prompt, { contextFiles: [], skills: [] }, "turn_start");
+		persistSessionCapture(id, prompt, registry);
+		const file = join(STORE_DIR(), `${id}.json`);
+		const written = readFileSync(file, "utf8");
+		const eightDaysAgo = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+		utimesSync(file, eightDaysAgo, eightDaysAgo);
+		persistSessionCapture(id, prompt, registry);
+		assert.ok(Date.now() - statSync(file).mtimeMs < 60_000, "an active session's file is not left to be pruned");
+
+		rmSync(file);
+		persistSessionCapture(id, prompt, registry);
+		assert.ok(existsSync(file), "a deleted file is written again");
+		assert.equal(readFileSync(file, "utf8"), written);
+	});
+
+	/** A store file as an earlier process would have left it for session `id`. */
+	function writeStore(id, prompts, rule = `rule ${n}`) {
+		mkdirSync(STORE_DIR(), { recursive: true });
+		writeFileSync(join(STORE_DIR(), `${id}.json`), JSON.stringify({
+			version: 1,
+			sessionId: id,
+			captures: prompts.map((assembledPrompt) => ({ assembledPrompt, contextFiles: [{ path: "/repo/AGENTS.md", content: rule }], skills: [], source: "turn_start" })),
+		}));
+	}
+
+	it("keeps the captures an earlier process stored for the same session when a new process writes it", () => {
+		const id = `resumed-${++n}`;
+		const promptA = `You are pi, earlier process ${n}.`;
+		const promptB = `You are pi, this process ${n}.`;
+		writeStore(id, [promptA]);
+		const registry = new PromptCaptures();
+		assert.equal(loadOwnCaptures(id, registry), 1);
+		registry.record(promptB, { contextFiles: [], skills: [] }, "turn_start");
+		persistSessionCapture(id, promptB, registry);
+		const stored = JSON.parse(readFileSync(join(STORE_DIR(), `${id}.json`), "utf8"));
+		assert.deepEqual(stored.captures.map((c) => c.assembledPrompt), [promptA, promptB]);
+		assert.equal(registry.resolveOrDerive(promptA).assembledPrompt, promptA);
+	});
+
+	it("loads the session's own stored captures at session_start", () => {
+		const id = `own-${++n}`;
+		const prompt = `You are pi, resumed run ${n}.\n# Tools\n- read`;
+		writeStore(id, [prompt], `own rule ${n}`);
+		assert.throws(() => __test.promptCaptures.resolveOrDerive(prompt), /no capture for this/);
+		const handlers = activateWithMockPi();
+		handlers.get("session_start")({ type: "session_start", reason: "resume" }, ctxFor(session(id), prompt));
+		assert.match(project(__test.promptCaptures.resolveOrDerive(prompt)), new RegExp(`own rule ${n}`));
 	});
 });
