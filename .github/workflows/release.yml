@@ -41,6 +41,7 @@ jobs:
           fi
 
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run test:unit
 
       # Trusted publishing needs npm >= 11.5.1.
