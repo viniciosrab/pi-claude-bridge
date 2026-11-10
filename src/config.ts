@@ -1,8 +1,10 @@
 // User-facing extension config. Loaded once at extension registration from
 // the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json)
-// and the project Pi config directory, project overriding global. Missing or
-// unparseable files are ignored (error to console.error, empty object
-// returned) so the extension always starts.
+// and the project Pi config directory, project overriding global. `provider`
+// is read from the global file only: a cloned repo could otherwise point the
+// bridge at its own Claude Code executable, load its own Claude Code settings
+// or turn on metered billing. Missing or unparseable files are ignored (error
+// to console.error, empty object returned) so the extension always starts.
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -110,6 +112,6 @@ export function loadConfig(cwd: string): Config {
 		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
 		askClaudeDeprecationShown: project.askClaudeDeprecationShown ?? global.askClaudeDeprecationShown,
 		askClaude: { ...global.askClaude, ...project.askClaude },
-		provider: { ...global.provider, ...project.provider },
+		provider: { ...global.provider },
 	};
 }

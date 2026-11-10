@@ -2321,7 +2321,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// + per-project) and .mcp.json. Since pi executes tools (not CC), those are pure
 	// token overhead. --strict-mcp-config tells the binary to use ONLY mcpServers passed
 	// programmatically and ignore filesystem MCP entries — applied unconditionally because
-	// settingSources is left at CC's default, which loads all sources.
+	// the user's settings are loaded (see providerSettingSourcesOption in fork.ts).
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 

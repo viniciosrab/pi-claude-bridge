@@ -7,7 +7,7 @@
 // edit upstream lines (shared imports, the Config interface, upstream tests or README),
 // add a hook line next to them instead.
 
-import { forkSession, type query, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, type query, type SettingSource, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { getClaudeDir, getSessionPath } from "cc-session-io";
@@ -21,9 +21,11 @@ import { nonSystemMessages } from "./transcript.js";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
 export interface ForkProviderSettings {
-	// Set to false to stop the provider's Claude Code subprocess from loading
-	// user/project/local settings (hooks, plugins, env, apiKeyHelper).
-	loadClaudeSettings?: boolean;
+	// Which Claude Code settings files (hooks, plugins, env, apiKeyHelper) the
+	// provider's subprocess loads. Absent or "user": ~/.claude/settings.json only.
+	// "all" (or true): also the repository's .claude/settings.json and
+	// .claude/settings.local.json. false: none.
+	loadClaudeSettings?: boolean | "user" | "all";
 	// Set to false to hide the Claude rate-limit notices (usage warnings and
 	// "rate limit reached") shown in pi. Failures are still named as rate limits.
 	rateLimitWarnings?: boolean;
@@ -35,22 +37,27 @@ function forkSettings(provider: object | undefined): ForkProviderSettings {
 	return (provider ?? {}) as ForkProviderSettings;
 }
 
-/** Provider-path `settingSources` override. Absent keeps the SDK default (all sources);
- *  `loadClaudeSettings: false` passes an empty list so no settings files are loaded. */
-export function providerSettingSourcesOption(provider?: object): { settingSources?: [] } {
-	return forkSettings(provider).loadClaudeSettings === false ? { settingSources: [] } : {};
+/** Provider-path `settingSources`. The default is the user's own settings only: pi has
+ *  no trust prompt, so a cloned repository's hooks, `apiKeyHelper` and `env` would
+ *  otherwise run as soon as it is opened. `loadClaudeSettings: "all"` (or `true`) adds
+ *  the repository's project and local settings; `false` loads no settings files. */
+export function providerSettingSourcesOption(provider?: object): { settingSources: SettingSource[] } {
+	const choice = forkSettings(provider).loadClaudeSettings;
+	if (choice === false) return { settingSources: [] };
+	if (choice === true || choice === "all") return { settingSources: ["user", "project", "local"] };
+	return { settingSources: ["user"] };
 }
 
 /** Wrap the SDK's query() so provider launches get providerSettingSourcesOption. Hooked
  *  where src/index.ts assigns queryImpl, which upstream leaves alone, rather than in the
  *  provider block it keeps rewriting. Provider launches run Claude Code with `tools: []`
  *  (so does the isolated summary, already sourceless); AskClaude keeps CC's own tools and
- *  is left alone. Calls pass through untouched unless the option is set. */
+ *  is left alone. */
 export function withProviderSettingSources(impl: typeof query, getProvider: () => object | undefined): typeof query {
 	return ((params: Parameters<typeof query>[0]) => {
 		const override = providerSettingSourcesOption(getProvider());
 		const tools = params.options?.tools;
-		if (!override.settingSources || !Array.isArray(tools) || tools.length > 0) return impl(params);
+		if (!Array.isArray(tools) || tools.length > 0) return impl(params);
 		return impl({ ...params, options: { ...params.options, ...override } });
 	}) as typeof query;
 }

@@ -7,13 +7,15 @@ import assert from "node:assert/strict";
 import { FORK_CHILD_ENV, applyForkChildEnv, providerSettingSourcesOption, rateLimitNoticesEnabled, withProviderSettingSources, withRateLimitNoticeFilter } from "../src/fork.js";
 
 describe("providerSettingSourcesOption", () => {
-	it("leaves settingSources at the SDK default when unset", () => {
-		assert.deepEqual(providerSettingSourcesOption(), {});
-		assert.deepEqual(providerSettingSourcesOption({}), {});
+	it("loads only the user's settings when unset", () => {
+		assert.deepEqual(providerSettingSourcesOption(), { settingSources: ["user"] });
+		assert.deepEqual(providerSettingSourcesOption({}), { settingSources: ["user"] });
+		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: "user" }), { settingSources: ["user"] });
 	});
 
-	it("leaves settingSources at the SDK default when loadClaudeSettings is true", () => {
-		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: true }), {});
+	it("adds the repository's project and local settings when loadClaudeSettings is \"all\" or true", () => {
+		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: "all" }), { settingSources: ["user", "project", "local"] });
+		assert.deepEqual(providerSettingSourcesOption({ loadClaudeSettings: true }), { settingSources: ["user", "project", "local"] });
 	});
 
 	it("disables every setting source when loadClaudeSettings is false", () => {
@@ -30,9 +32,9 @@ describe("withProviderSettingSources", () => {
 		return { params, seen };
 	}
 
-	it("passes a provider launch through untouched when loadClaudeSettings is unset", () => {
-		const { params, seen } = launch({}, { tools: [], settingSources: ["user"] });
-		assert.equal(seen, params);
+	it("limits a provider launch to the user's settings when loadClaudeSettings is unset", () => {
+		const { seen } = launch({}, { tools: [], model: "m" });
+		assert.deepEqual(seen.options, { tools: [], settingSources: ["user"], model: "m" });
 	});
 
 	it("empties settingSources on a provider launch when loadClaudeSettings is false", () => {
