@@ -4,27 +4,14 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
 
 ## Ideas
 
-1. **#30: pruning costs Claude all context for that turn.** When `pi-context-prune`
-   shrinks pi's history below our cursor we clean-start, so Claude answers that turn
-   with no prior conversation. Rebuilding from the pruned messages keeps the
-   (compressed) context and still bounds the JSONL, which is what the issue asks
-   for. The discriminator must be **reentrancy, not message count**: the
-   shorter-context branch in `syncSharedSession` is also the guard that stops a
-   subagent resuming and overwriting the parent's session, and a subagent's priors
-   are not empty. `isReentrant` is computed immediately before the main
-   `syncSharedSession` call (`src/index.ts:1642`) and just isn't
-   passed in. The stale `fix/issue-30-pruned-history` branch discriminates on
-   `priorMessages.length === 0` and would break subagent isolation -- do not merge
-   it. Guarded by `unit-sync-shared-session.mjs` plus `int-subagent-rpiv-codebase-locator.mjs`.
-
-2. **Synthetic all-zero usage overwrites real counters.** A `<synthetic>` failure
+1. **Synthetic all-zero usage overwrites real counters.** A `<synthetic>` failure
    message carries all-zero usage, and `recordUsage`/`updateUsage` (`src/usage.ts`)
    guard absence, not zeros — so a failure after real output in the same turn erases
    input/output/cache totals. Pre-existing (the synthetic message always reached
    `recordUsage`); reachable pre-#162 too, since synthetic ids are UUIDs and always
    pass the different-id check.
 
-3. **CC's typed error fields are ignored.** The SDK assistant frame declares only
+2. **CC's typed error fields are ignored.** The SDK assistant frame declares only
    `error?: SDKAssistantMessageError` (`sdk.d.ts:3605`), the result a snake_case
    `api_error_status`; the camelCase `apiErrorStatus` / `isApiErrorMessage: true`
    seen on disk are transcript-record fields, and `error: "rate_limit"` rides on the
@@ -33,17 +20,17 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
    A contract pin on these fields would let failure classification stop relying on
    wording. The `rate_limit_event` path covers the common case.
 
-4. **Make the dropped-thinking-signature rate visible.** 26 of 2,363
+3. **Make the dropped-thinking-signature rate visible.** 26 of 2,363
    `claude-bridge` thinking blocks carry an empty `thinkingSignature`, so
    `src/convert.ts:144` correctly refuses to replay them (Anthropic rejects
    unverifiable signatures) -- but silently. A WARNING at the drop site turns a
    1.1% invisible loss into a number, which is the prerequisite for ever
    explaining it.
 
-5. **Per-query rewrite staleness — done for the serving instance; worktree-spawn instances still mark via the `Symbol.for` hook registry** (`claude-bridge:markRebuildHooks`), which relies on every instance loading the same module. If a future pi loader change makes that unreliable, the hook registry needs to grow into a shared state channel (per-session mark records the serving instance reads). Session id attribution rides on `options.sessionId`, which pi-ai documents as ignorable metadata — verify it stays set on `streamSimple` calls (agent.ts passes `sessionManager.getSessionId()` today).
-6. **Decide which other `WARNING:` lines should fail integration runs.** The suite gates bridge-origin `BUG:` and stranded MCP-handler markers; `diag/audit-warnings.mjs` inventories the remaining warnings. Add a warning only when its meaning and any intentional test cases are pinned.
+4. **Per-query rewrite staleness — done for the serving instance; worktree-spawn instances still mark via the `Symbol.for` hook registry** (`claude-bridge:markRebuildHooks`), which relies on every instance loading the same module. If a future pi loader change makes that unreliable, the hook registry needs to grow into a shared state channel (per-session mark records the serving instance reads). Session id attribution rides on `options.sessionId`, which pi-ai documents as ignorable metadata — verify it stays set on `streamSimple` calls (agent.ts passes `sessionManager.getSessionId()` today).
+5. **Decide which other `WARNING:` lines should fail integration runs.** The suite gates bridge-origin `BUG:` and stranded MCP-handler markers; `diag/audit-warnings.mjs` inventories the remaining warnings. Add a warning only when its meaning and any intentional test cases are pinned.
 
-7. **Stop the diag replay harness manufacturing the phantom-tool-call condition.**
+6. **Stop the diag replay harness manufacturing the phantom-tool-call condition.**
    `diag/replay-write-path.mjs` and `diag/lib/write-path.mjs` (also used by
    `unit-convert-determinism`) call the conversion without a populated
    `customToolNameToSdk` map, so pi's `bash` is rebuilt as Claude Code's builtin
@@ -52,12 +39,12 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
    under test. Fix: pass the recorded tool list through to `convertPiMessages`.
    Production is unaffected (verified over 86,652 real pi messages).
 
-8. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** -- the
+7. **Mirror `eli/lifecycle-coverage-gaps.md` into a tracked file** -- the
    QueryContext lifecycle x sync-path coverage map is in a gitignored directory, so
    nobody else gets it. Belongs in `docs/` or as a section of `diag/AUDIT.md`. (The
    provenance rule is already in `AGENTS.md`.)
 
-9. **Surface errors that arrive with no open pi stream.** When a result lands
+8. **Surface errors that arrive with no open pi stream.** When a result lands
    after the turn already ended on a tool call, `consumeQuery` records the error
    (stopReason, errorMessage, log) but there is no open `currentPiStream` to push
    an error event onto, so the user sees a stalled turn rather than "rate limited".
@@ -65,26 +52,26 @@ Ideas and open questions, ordered by rough priority. Nothing is a commitment.
    `tests/unit-error-result.mjs` covers the recording; nothing covers the
    surfacing. This is also the third stall cause behind GitHub #35.
 
-10. **Handler timeout / stall watchdog** -- whether the bridge should give up on an
+9. **Handler timeout / stall watchdog** -- whether the bridge should give up on an
    MCP handler that has waited implausibly long instead of only warning.
 
-11. **`/claude config` slash command** for runtime configuration. Currently
+10. **`/claude config` slash command** for runtime configuration. Currently
     requires editing JSON and `/reload`.
 
-12. **`/claude:btw` command** for ephemeral questions: response displayed but
+11. **`/claude:btw` command** for ephemeral questions: response displayed but
     not added to LLM context.
 
-13. **Audit tool parameter mismatches**: The bash timeout default (120s) was added
+12. **Audit tool parameter mismatches**: The bash timeout default (120s) was added
     because pi's bash has no default while Claude Code expects one. Other bridged
     tools may have similar mismatches (units, defaults, optional-vs-required params).
     Compare Claude Code's tool schemas against pi's for read, write, edit, grep, find.
 
-14. **AskUserQuestion pi shim**: CC never sees AskUserQuestion (it's in `DISALLOWED_BUILTIN_TOOLS`), so it can't ask the
+13. **AskUserQuestion pi shim**: CC never sees AskUserQuestion (the provider starts CC with `tools: []`), so it can't ask the
     user questions interactively. Port a pi-native version using `ctx.ui.custom()`
     for an option picker with free-text fallback. See `fractary/pi-claude-code`
     `AskUserQuestion.ts` for reference.
 
-15. **PlanMode pi shim**: Similarly, EnterPlanMode/
+14. **PlanMode pi shim**: Similarly, EnterPlanMode/
     ExitPlanMode are blocked. A pi-native plan mode could use
     `pi.setActiveTools()` to restrict to read-only tools, block destructive bash
     via `tool_call` event, and surface plan approval through pi's TUI. See
@@ -176,8 +163,7 @@ Nothing to fix here -- filed or inherent in the other project.
     Narrows the race window but doesn't close it (CC's pending `fs.appendFile`
     calls are invisible to the drain). Also requires making `syncSharedSession`
     async. Strictly worse than rotation.
-  - **Listen for the ChildProcess `exit` event directly.** Deterministic fix
-    (open-claude-agent-sdk does exactly this). Official SDK's Query interface
-    doesn't expose the child process -- would need to fork the SDK or reach
-    into private state. Rejected unless the SDK grows a `close({ graceful: true
-    })` or equivalent hook.
+  - **Listen for the ChildProcess `exit` event directly.** Done for the abort
+    path: `trackCliProcess` (`src/fork.ts`) launches the CLI through a spawner
+    that records its exit, and `postAbortSync` resumes the same file once the
+    aborted CLI is gone. Rotation remains for the rebuilds it cannot avoid.
