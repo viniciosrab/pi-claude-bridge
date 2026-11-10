@@ -106,9 +106,15 @@ def tab(title, rows, key):
         print(f"  {str(k):<32} {n:>5} {fails:>5} {100 * fails / n:>7.1f}%")
 
 
+def default_log_path():
+    """Same resolution as src/log-paths.ts: CLAUDE_BRIDGE_DEBUG_PATH, then pi's agent dir."""
+    agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
+    return os.environ.get("CLAUDE_BRIDGE_DEBUG_PATH") or os.path.join(agent_dir, "claude-bridge.log")
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else \
-        os.path.expanduser("~/.pi/agent/claude-bridge.log")
+        default_log_path()
     queries = parse(path)
     resolved = [q for q in queries if q["outcome"]]
     fails = [q for q in resolved if q["outcome"] == "EXTRA_USAGE"]

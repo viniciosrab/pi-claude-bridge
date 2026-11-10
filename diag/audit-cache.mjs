@@ -58,10 +58,10 @@ if (Number.isNaN(since) || Number.isNaN(ceiling)) {
 	process.exit(2);
 }
 // Same resolution as src/log-paths.ts, without pulling pi's runtime into a diag
-// script: PI_CODING_AGENT_DIR wins, ~/.pi/agent is only the default.
+// script: CLAUDE_BRIDGE_DEBUG_PATH wins, then PI_CODING_AGENT_DIR; ~/.pi/agent is only the default.
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const logPath = args.filter((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"))[0]
-	?? join(agentDir, "claude-bridge.log");
+	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge.log"));
 
 // A turn emits several `usage:` lines reporting the same request as its output
 // grows. Collapsing runs that share (cacheRead, cacheWrite, model) leaves one row
