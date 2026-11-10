@@ -1217,7 +1217,7 @@ const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"])
 // level CC accepts.
 function effortForReasoning(model: Model<any>, reasoning: string | undefined): EffortLevel | undefined {
 	if (!reasoning) return undefined;
-	const mapped = model.thinkingLevelMap?.[reasoning];
+	const mapped = levelMap(model)?.[reasoning];
 	if (mapped === undefined) return REASONING_TO_EFFORT[reasoning];
 	return VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined;
 }
@@ -1227,8 +1227,17 @@ function effortForReasoning(model: Model<any>, reasoning: string | undefined): E
 // provider does: for reasoning models, unless the model's thinkingLevelMap marks
 // "off" unsupported (null), as on models that always think.
 function thinkingForReasoning(model: Model<any>, reasoning: string | undefined): ThinkingConfig | undefined {
-	if (reasoning || !model.reasoning || model.thinkingLevelMap?.off === null) return undefined;
+	if (reasoning || !model.reasoning || levelMap(model)?.off === null) return undefined;
 	return { type: "disabled" };
+}
+
+// pi-ai 1.5 declares Model.thinkingLevelMap through pi-schema's Static, which
+// resolves to `unknown` under this tsconfig. Read it with the shape pi-ai's
+// ThinkingLevelMapSchema declares (level -> provider string, or null when the
+// level is unsupported). Type-only: the value is used as is.
+type ThinkingLevelMapShape = Partial<Record<string, string | null>>;
+function levelMap(model: Model<any>): ThinkingLevelMapShape | undefined {
+	return model.thinkingLevelMap as ThinkingLevelMapShape | undefined;
 }
 
 // --- Provider helpers: misc ---

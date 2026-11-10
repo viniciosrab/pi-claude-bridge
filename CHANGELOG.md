@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Bump: develop and test against pi 1.5.1** — the dev dependencies were pinned at pi 1.2.0, so the checks that read pi's own code (the `streamFn` consumer inventory and the system prompt preamble pin) were testing a pi nobody runs. They now run against 1.5.1: pi's three new `streamFn` mentions only mark a stream function for auth and never call it, and the preamble pin follows pi 1.5's wording, which `src/fork-prompt-guard.ts` already guarded. `@earendil-works/pi-tui`, no longer imported, is dropped from the peer and dev dependencies.
 - **Fix: recording the one-time notice no longer empties the global config for a moment** — the bridge rewrote `claude-bridge.json` in place, so a pi starting at that instant could read an empty file and run without its `provider` settings. It now writes a temp file and renames it over the config, following a symlinked config to its target and keeping its permissions.
 - **Fix: the session mirror file is owner-only and safe to save from two windows** — `claude-bridge-mirrors/` files, which can hold an aborted prompt's text, were created with default permissions; they are now `0600` in a `0700` directory, like `claude-bridge-captures/`. Each process also writes its own temp file before the rename, so two pi windows saving the same session cannot leave a half-written mirror.
 - **Fix: no false "malformed JSONL" warning for an empty rebuilt session** — a rebuild whose history converted to no records was reported as a broken session file, with a request to open an issue.
