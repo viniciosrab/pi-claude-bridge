@@ -1,6 +1,6 @@
 // User-facing extension config. Loaded once at extension registration from
-// the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json)
-// and the project Pi config directory. `provider` and `askClaude` are read
+// the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json,
+// or the file CLAUDE_BRIDGE_CONFIG names) and the project Pi config directory. `provider` and `askClaude` are read
 // from the global file only: a cloned repo could otherwise point the bridge
 // at its own Claude Code executable, load its own Claude Code settings, turn
 // on metered billing or enable AskClaude with full permissions. Only the

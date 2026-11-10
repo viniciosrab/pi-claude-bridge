@@ -17,6 +17,8 @@ process.env.HOME = root;
 process.env.USERPROFILE = root;
 process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 process.env.PI_CODING_AGENT_SESSION_DIR = join(root, "sessions");
+// A developer's exported override would point the tests at their real config file.
+delete process.env.CLAUDE_BRIDGE_CONFIG;
 process.env.CLAUDE_CONFIG_DIR = join(root, "claude");
 process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(root, "claude-bridge.log");
 delete process.env.CLAUDE_BRIDGE_RECORD_STREAM;
