@@ -87,8 +87,10 @@ export function markStartupNoticeShown(): string {
 		mkdirSync(dirname(target), { recursive: true });
 		const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
 		tmp = `${target}.${process.pid}.tmp`;
-		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
-		// Explicit chmod: writeFileSync's mode is masked by the umask.
+		// Owner-only while the contents land, so a private config is never readable in
+		// between; then the target's own mode, set explicitly because the umask masks
+		// writeFileSync's mode.
+		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 		if (mode !== undefined) chmodSync(tmp, mode);
 		renameSync(tmp, target);
 	} catch (e) {
@@ -98,14 +100,21 @@ export function markStartupNoticeShown(): string {
 	return path;
 }
 
-/** The file a rewrite of `path` must replace: the symlink's target when `path` is a link,
- *  also one whose target does not exist yet, so the rename never replaces the link. */
+/** The file a rewrite of `path` must replace: the end of its symlink chain, also a chain
+ *  whose last target does not exist yet, so the rename never replaces a link. */
 function writeTarget(path: string): string {
 	if (existsSync(path)) return realpathSync(path);
-	try {
-		if (lstatSync(path).isSymbolicLink()) return resolve(dirname(path), readlinkSync(path));
-	} catch {}
-	return path;
+	let target = path;
+	// A bound, like the kernel's, so a link cycle cannot loop forever.
+	for (let hops = 0; hops < 40; hops++) {
+		try {
+			if (!lstatSync(target).isSymbolicLink()) break;
+		} catch {
+			break; // the chain ends at a file that does not exist yet
+		}
+		target = resolve(dirname(target), readlinkSync(target));
+	}
+	return target;
 }
 
 /** The notice for a user whose global config still turns on the removed AskClaude tool,

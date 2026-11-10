@@ -199,6 +199,22 @@ describe("loadConfig", () => {
 		assert.match(JSON.parse(readFileSync(real, "utf-8")).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
 	}));
 
+	it("markStartupNoticeShown follows a chain of links to a missing file", () => withTempHome((home) => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const real = join(home, "dotfiles-final.json");
+		const middle = join(home, "dotfiles-link.json");
+		symlinkSync(real, middle);
+		const link = join(globalDir, "claude-bridge.json");
+		symlinkSync(middle, link);
+
+		markStartupNoticeShown();
+
+		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
+		assert.ok(lstatSync(middle).isSymbolicLink(), "the link in the middle must stay a symlink");
+		assert.match(JSON.parse(readFileSync(real, "utf-8")).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
+	}));
+
 	it("markStartupNoticeShown keeps the config's mode under a restrictive umask", () => withTempHome(() => {
 		const globalDir = getAgentDir();
 		mkdirSync(globalDir, { recursive: true });
