@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Fix: recording the one-time notice no longer empties the global config for a moment** — the bridge rewrote `claude-bridge.json` in place, so a pi starting at that instant could read an empty file and run without its `provider` settings. It now writes a temp file and renames it over the config, following a symlinked config to its target and keeping its permissions.
 - **Fix: the session mirror file is owner-only and safe to save from two windows** — `claude-bridge-mirrors/` files, which can hold an aborted prompt's text, were created with default permissions; they are now `0600` in a `0700` directory, like `claude-bridge-captures/`. Each process also writes its own temp file before the rename, so two pi windows saving the same session cannot leave a half-written mirror.
 - **Fix: no false "malformed JSONL" warning for an empty rebuilt session** — a rebuild whose history converted to no records was reported as a broken session file, with a request to open an issue.
 - **Fix: a rebuild that fails no longer deletes Claude Code's session file** — a rebuild deleted the old session file before converting pi's history, so a conversion error (or a failed save) left no file, with the bridge still pointing at it and the carried `@file` expansions lost. The history is now converted first; if the save itself fails, the bridge forgets the session and rebuilds cleanly next turn.

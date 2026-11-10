@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -165,6 +165,25 @@ describe("loadConfig", () => {
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
+	}));
+
+	it("markStartupNoticeShown keeps a symlinked config linked and its permissions", () => withTempHome((home) => {
+		const globalDir = getAgentDir();
+		mkdirSync(globalDir, { recursive: true });
+		const real = join(home, "dotfiles-claude-bridge.json");
+		writeFileSync(real, JSON.stringify({ provider: { plan: "max" } }), { mode: 0o600 });
+		chmodSync(real, 0o600);
+		const link = join(globalDir, "claude-bridge.json");
+		symlinkSync(real, link);
+
+		markStartupNoticeShown();
+
+		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
+		const written = JSON.parse(readFileSync(real, "utf-8"));
+		assert.equal(written.provider.plan, "max");
+		assert.match(written.startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
+		assert.equal(statSync(real).mode & 0o777, 0o600);
+		assert.deepEqual(readdirSync(home).filter((name) => name.endsWith(".tmp")), []);
 	}));
 
 	it("markStartupNoticeShown leaves an unparseable config untouched", () => withTempHome(() => {

@@ -9,7 +9,7 @@
 // returned) so the extension always starts.
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 export interface Config {
@@ -77,7 +77,15 @@ export function markStartupNoticeShown(): string {
 	// en-CA renders YYYY-MM-DD in local time; toISOString() would report UTC.
 	const next = { ...existing, startupNoticeShown: new Date().toLocaleDateString("en-CA") };
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+	// Temp file and rename: writing in place empties the user's config first, and a pi
+	// starting in that moment would read it as unparseable and run without its settings.
+	// The rename lands on the symlink's target, with its permissions, so a config kept in
+	// a dotfiles repo stays linked and a private one stays private.
+	const target = existsSync(path) ? realpathSync(path) : path;
+	const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
+	const tmp = `${target}.${process.pid}.tmp`;
+	writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, mode === undefined ? undefined : { mode });
+	renameSync(tmp, target);
 	return path;
 }
 
