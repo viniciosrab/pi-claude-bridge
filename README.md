@@ -46,7 +46,7 @@ Optional. Global: `~/.pi/agent/claude-bridge.json`. A `.pi/claude-bridge.json` i
 | `strictMcpConfig` | `true` | Ignore MCP servers from `~/.claude.json` and `.mcp.json`. |
 | `autoMemoryEnabled` | `false` | Turn on Claude Code's auto-memory. |
 | `pathToClaudeCodeExecutable` | bundled | Path to your own `claude` binary (e.g. on Nix). |
-| `loadClaudeSettings` | `"user"` | Which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` loads `~/.claude/settings.json` only. `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`: use it only in repositories you trust. `false` loads none, which cuts tokens and latency. |
+| `loadClaudeSettings` | `"user"` | Which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` loads `~/.claude/settings.json` only. `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`: use it only in repositories you trust. `false` loads none on provider turns, which cuts tokens and latency. AskClaude always keeps `~/.claude/settings.json` and, with `"all"`, adds only the repository's `.claude/settings.json`. |
 | `rateLimitWarnings` | `true` | Set `false` to hide the rate-limit warnings and reset-time notices. |
 
 Context window: Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 always run with 1M context. Opus 4.6 gets 1M with `plan: "max"` or `longContextExtraUsage`, and Sonnet 4.6 only with `longContextExtraUsage`. Any other model runs at 200K until its 1M context is measured and added to the bridge.

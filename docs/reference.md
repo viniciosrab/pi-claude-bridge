@@ -54,7 +54,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
-- `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none.
+- `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none on provider turns. AskClaude always keeps `~/.claude/settings.json` and, with `"all"`, adds only the repository's `.claude/settings.json`.
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
 
 
