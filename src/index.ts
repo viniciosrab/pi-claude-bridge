@@ -860,10 +860,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
 	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
-	if (preserveId) {
-		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
-		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
-	}
+	// createSession and the import only build records in memory, so a history that
+	// cannot be converted throws here while the old file is still intact.
 	const session = createSession({
 		projectPath: cwd,
 		claudeDir: process.env.CLAUDE_CONFIG_DIR,
@@ -871,7 +869,18 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		...(modelId ? { model: modelId } : {}),
 	});
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, carried);
-	session.save();
+	if (preserveId) {
+		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
+		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
+	}
+	try {
+		session.save();
+	} catch (error) {
+		// The old file may be gone and the new one is not whole: no state may name either.
+		setSessionStateFor(piSessionId, null);
+		if (piSessionId) dropMirror(piSessionId);
+		throw error;
+	}
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
