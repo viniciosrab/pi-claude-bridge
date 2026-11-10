@@ -145,10 +145,6 @@ describe("syncSharedSession", () => {
 		}
 	});
 
-	// The rebuilt file holds one line per record, and a carried `@file` expansion
-	// is an `attachment` record — which `session.messages` filters out. Counting
-	// messages told every user who at-mentioned a file before switching providers
-	// that their session was corrupt, and asked them to open an issue about it.
 	// A rebuild used to delete the old file before converting pi's history, so a
 	// conversion that throws left no session file behind, with the state still naming it.
 	it("keeps the old session file when a rebuild cannot convert the history", () => {
@@ -179,6 +175,10 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// The rebuilt file holds one line per record, and a carried `@file` expansion
+	// is an `attachment` record — which `session.messages` filters out. Counting
+	// messages told every user who at-mentioned a file before switching providers
+	// that their session was corrupt, and asked them to open an issue about it.
 	it("does not report a count mismatch when a rebuild carries an attachment", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
 		const sessionId = randomUUID();
