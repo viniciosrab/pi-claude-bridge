@@ -28,6 +28,9 @@ describe("prompt guard", () => {
 			assert.match(error.message, /offset 0 of \d+ chars/);
 			assert.match(error.message, /Capture: before_agent_start/);
 			assert.match(error.message, /Compatibility with other extensions/);
+			// The section lives in docs/reference.md, which the npm package does not ship.
+			assert.match(error.message, /docs\/reference\.md#compatibility-with-other-extensions/);
+			assert.doesNotMatch(error.message, /see README/);
 			return true;
 		});
 	});

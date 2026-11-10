@@ -414,7 +414,8 @@ function assertSendablePrompt(parts: readonly PromptPart[], capture: PromptCaptu
 		"  app: it fails with 400 or is billed as extra usage.",
 		...findings.map((finding) => `  Found: ${finding}.`),
 		`  Capture: ${capture.source ?? "unknown"}, ${capture.inherited.length} inherited capture(s) substituted.`,
-		"  If this came from an inherited pi prompt, see README \"Compatibility with other extensions\".",
+		"  If this came from an inherited pi prompt, see \"Compatibility with other extensions\":",
+		"  https://github.com/viniciosrab/pi-claude-bridge/blob/main/docs/reference.md#compatibility-with-other-extensions",
 		"  If it is your own text, reword or remove it. CLAUDE_BRIDGE_DEBUG=1 writes the full prompt to",
 		`  ${debugLogPath()}.`,
 	].join("\n"));
