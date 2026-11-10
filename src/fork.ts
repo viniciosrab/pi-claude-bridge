@@ -13,7 +13,7 @@ import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-
 import { getClaudeDir, getSessionPath } from "cc-session-io";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { sessionCwdFor } from "./session-cwd.js";
@@ -581,6 +581,8 @@ export function saveMirror(piSessionId: string, record: Omit<MirrorRecord, "pid"
 	try {
 		// Owner-only, like the capture store: an aborted turn's record holds its prompt.
 		mkdirSync(mirrorDir(), { recursive: true, mode: 0o700 });
+		// mkdir's mode applies only on creation: tighten a directory an older version made.
+		chmodSync(mirrorDir(), 0o700);
 		pruneMirrors(now);
 		const file = mirrorPath(piSessionId);
 		const turns = turnBoundaries(readMirror(piSessionId), record);
