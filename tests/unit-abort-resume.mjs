@@ -62,6 +62,7 @@ beforeEach(() => {
 		const script = scripts.shift();
 		if (!script) throw new Error("no fake script queued");
 		calls.push({ label: script.label, resume: options.resume, at: Date.now() });
+		script.onQuery?.(); // runs as the query is created, before any of its steps
 		if (script.cli) {
 			assert.equal(typeof options.spawnClaudeCodeProcess, "function", "the bridge launches the CLI through a spawner it can watch");
 			script.proc = options.spawnClaudeCodeProcess({ command: process.execPath, args: ["-e", script.cli], env: { ...process.env, ...script.env }, signal: new AbortController().signal });
@@ -98,6 +99,17 @@ const CLI_LAGS = `process.stdin.on("end", () => setTimeout(() => {
 // Ignores the EOF and SIGTERM: alive until afterEach kills it.
 const CLI_STUCK = `process.on("SIGTERM", () => {}); process.stdin.resume(); setInterval(() => {}, 1000);`;
 const exited = (proc) => proc.exitCode !== null || proc.signalCode !== null;
+// Whether the bridge may treat the CLI as gone: reaped, or a zombie this process has not
+// reaped yet. After a reload the bridge polls /proc and proceeds on a zombie, which can come
+// before this process dispatches the child's exit event, so `exited` alone races (#40).
+const goneForBridge = (proc) => {
+	if (exited(proc)) return true;
+	try {
+		return readFileSync(`/proc/${proc.pid}/stat`, "utf8").replace(/^.*\) /s, "").startsWith("Z");
+	} catch {
+		return process.platform === "linux"; // no /proc entry on Linux: already reaped
+	}
+};
 
 // --- pi-side message builders ---
 let clock = 0;
@@ -495,10 +507,11 @@ describe("the turn after an abort and a /reload", () => {
 		reload();
 
 		const startedAt = Date.now();
-		scripts.push({ label: "turn 3", steps: [init("cc-1"), result("ok")] });
+		let cliGoneAtQuery;
+		scripts.push({ label: "turn 3", onQuery: () => { cliGoneAtQuery = goneForBridge(proc); }, steps: [init("cc-1"), result("ok")] });
 		await call(P, [u1, a1, u2, a2, u3]).result();
 
-		assert.ok(exited(proc), "the next query waited for the CLI to exit");
+		assert.equal(cliGoneAtQuery, true, "the next query waited for the CLI to exit");
 		assert.equal(calls.at(-1).resume, id, "the finished file is resumed");
 		assert.ok(calls.at(-1).at - startedAt < 2_000, `the wait lasted ${calls.at(-1).at - startedAt}ms, not just until the exit`);
 	});
