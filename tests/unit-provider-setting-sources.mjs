@@ -1,7 +1,7 @@
 /**
  * provider.loadClaudeSettings wiring: the provider path must hand the SDK
- * `settingSources: []` only when the user opted out, and leave upstream's
- * choice (absent, or its own list) untouched otherwise. unit-fork.mjs pins the
+ * `settingSources: []` when the user opted out, the user's settings alone by
+ * default, and the repository's settings only when the user asked for them. unit-fork.mjs pins the
  * helper; this pins that the provider query actually receives it. Drives
  * streamSimple with a mocked SDK query() (see setQuery) — no Claude Code
  * subprocess runs.
@@ -81,14 +81,19 @@ beforeEach(() => resetSharedSession());
 afterEach(() => setQuery(null));
 
 describe("provider query settingSources", () => {
-	it("is left to upstream when loadClaudeSettings is unset", async () => {
+	it("is the user's settings only when loadClaudeSettings is unset", async () => {
 		const options = await capturedOptions({ provider: {} });
-		assert.notDeepEqual(options.settingSources, []);
+		assert.deepEqual(options.settingSources, ["user"]);
 	});
 
-	it("is left to upstream when loadClaudeSettings is true", async () => {
+	it("adds project and local settings when loadClaudeSettings is \"all\"", async () => {
+		const options = await capturedOptions({ provider: { loadClaudeSettings: "all" } });
+		assert.deepEqual(options.settingSources, ["user", "project", "local"]);
+	});
+
+	it("adds project and local settings when loadClaudeSettings is true", async () => {
 		const options = await capturedOptions({ provider: { loadClaudeSettings: true } });
-		assert.notDeepEqual(options.settingSources, []);
+		assert.deepEqual(options.settingSources, ["user", "project", "local"]);
 	});
 
 	it("is empty when loadClaudeSettings is false", async () => {
@@ -111,5 +116,55 @@ describe("provider query settings", () => {
 	it("pins Claude Code's default output style over a user-level one", async () => {
 		const options = await capturedOptions({ provider: {} });
 		assert.equal(options.settings.outputStyle, "default");
+	});
+});
+
+describe("isolated summary settingSources", () => {
+	// Compaction and other one-offs load no settings files, whatever the provider option says.
+	for (const choice of [undefined, "all", true, false]) it(`stays empty when loadClaudeSettings is ${JSON.stringify(choice)}`, async () => {
+		register({ provider: choice === undefined ? {} : { loadClaudeSettings: choice } });
+		let seen;
+		setQuery(({ options }) => {
+			seen = options;
+			const gen = (async function* () { yield { type: "result", subtype: "success", is_error: false, result: "summary" }; })();
+			gen.interrupt = async () => {};
+			gen.close = () => {};
+			return gen;
+		});
+		await mod.__test.isolatedStreamFn(
+			provider.model,
+			{ systemPrompt: "Summarize.", messages: [{ role: "user", content: [{ type: "text", text: "Summarize." }], timestamp: 0 }] },
+			{ cacheRetention: "none" },
+		).result();
+		assert.deepEqual(seen.settingSources, []);
+	});
+});
+
+describe("AskClaude settingSources", () => {
+	async function askClaudeOptions(config) {
+		register(config);
+		let seen;
+		mod.__test.setAskClaudeQuery(({ options }) => {
+			seen = options;
+			const gen = (async function* () { yield { type: "result", subtype: "success", is_error: false, result: "answer" }; })();
+			gen.interrupt = async () => {};
+			gen.close = () => {};
+			return gen;
+		});
+		try {
+			await mod.__test.promptAndWait("hi", "read", new Map(), undefined, { isolated: true, appendSkills: false });
+		} finally {
+			mod.__test.setAskClaudeQuery(null);
+		}
+		assert.ok(seen, "AskClaude never called query()");
+		return seen;
+	}
+
+	it("is the user's settings only by default", async () => {
+		assert.deepEqual((await askClaudeOptions({ provider: {} })).settingSources, ["user"]);
+	});
+
+	it("adds the repository's project settings when loadClaudeSettings is \"all\"", async () => {
+		assert.deepEqual((await askClaudeOptions({ provider: { loadClaudeSettings: "all" } })).settingSources, ["user", "project"]);
 	});
 });

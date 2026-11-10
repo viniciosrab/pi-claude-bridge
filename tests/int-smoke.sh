@@ -18,8 +18,9 @@ FAIL=0
 
 TEST_CWD_PREFIX="$LOGDIR/smoke-cwd."
 TEST_CWD=$(mktemp -d "$TEST_CWD_PREFIX"XXXXXX)
-mkdir -p "$TEST_CWD/.pi"
-printf '{"askClaude":{"enabled":true}}\n' > "$TEST_CWD/.pi/claude-bridge.json"
+# AskClaude is read from the global config only; supply one without replacing pi's agent dir.
+export CLAUDE_BRIDGE_CONFIG="$TEST_CWD/claude-bridge.json"
+printf '{"askClaude":{"enabled":true}}\n' > "$CLAUDE_BRIDGE_CONFIG"
 cd "$TEST_CWD"
 cleanup() {
   if [[ "${TEST_CWD:-}" == "$TEST_CWD_PREFIX"* && ${#TEST_CWD} -gt ${#TEST_CWD_PREFIX} && -d "$TEST_CWD" ]]; then

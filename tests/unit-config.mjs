@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown } from "../src/config.js";
+import { claudeCodeSettings, globalConfigPath, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -35,7 +35,7 @@ describe("claudeCodeSettings", () => {
 });
 
 describe("loadConfig", () => {
-	it("loads project config from Pi's configured project directory", () => withTempHome(() => {
+	it("ignores a project's provider and askClaude config", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
 			const configDir = join(cwd, CONFIG_DIR_NAME);
@@ -48,15 +48,29 @@ describe("loadConfig", () => {
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
 				askClaudeDeprecationShown: undefined,
-				provider: { plan: "max" },
-				askClaude: { enabled: false },
+				provider: {},
+				askClaude: {},
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	}));
 
-	it("merges project config over global config", () => withTempHome((home) => {
+	it("reads the global config from CLAUDE_BRIDGE_CONFIG when it is set", () => withTempHome((home) => {
+		const path = join(home, "elsewhere.json");
+		writeFileSync(path, JSON.stringify({ askClaude: { enabled: true } }));
+		const oldConfig = process.env.CLAUDE_BRIDGE_CONFIG;
+		process.env.CLAUDE_BRIDGE_CONFIG = path;
+		try {
+			assert.equal(globalConfigPath(), path);
+			assert.deepEqual(loadConfig(home).askClaude, { enabled: true });
+		} finally {
+			if (oldConfig === undefined) delete process.env.CLAUDE_BRIDGE_CONFIG;
+			else process.env.CLAUDE_BRIDGE_CONFIG = oldConfig;
+		}
+	}));
+
+	it("keeps the global provider and askClaude config when a project sets its own", () => withTempHome((home) => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
 			const globalDir = getAgentDir();
@@ -75,8 +89,8 @@ describe("loadConfig", () => {
 			assert.deepEqual(loadConfig(cwd), {
 				startupNoticeShown: undefined,
 				askClaudeDeprecationShown: undefined,
-				provider: { plan: "max", strictMcpConfig: true, autoMemoryEnabled: true },
-				askClaude: { enabled: false, defaultMode: "read" },
+				provider: { plan: "pro", strictMcpConfig: true },
+				askClaude: { enabled: true, defaultMode: "read" },
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });

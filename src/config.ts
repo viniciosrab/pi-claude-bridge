@@ -1,8 +1,11 @@
 // User-facing extension config. Loaded once at extension registration from
-// the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json)
-// and the project Pi config directory, project overriding global. Missing or
-// unparseable files are ignored (error to console.error, empty object
-// returned) so the extension always starts.
+// the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json,
+// or the file CLAUDE_BRIDGE_CONFIG names) and the project Pi config directory. `provider` and `askClaude` are read
+// from the global file only: a cloned repo could otherwise point the bridge
+// at its own Claude Code executable, load its own Claude Code settings, turn
+// on metered billing or enable AskClaude with full permissions. Only the
+// one-time notice marks still read the project file. Missing or unparseable files are ignored (error
+// to console.error, empty object returned) so the extension always starts.
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -54,8 +57,10 @@ export function claudeCodeSettings(provider: Config["provider"] = {}): { autoMem
 	return { autoMemoryEnabled: provider.autoMemoryEnabled ?? false };
 }
 
+// CLAUDE_BRIDGE_CONFIG names another file to use as the global config, so a test or a
+// wrapper script can supply one without replacing pi's agent dir (and its login).
 export function globalConfigPath(): string {
-	return join(getAgentDir(), "claude-bridge.json");
+	return process.env.CLAUDE_BRIDGE_CONFIG || join(getAgentDir(), "claude-bridge.json");
 }
 
 /** Record today's date in the global config so the startup notice shows once, preserving every
@@ -109,7 +114,7 @@ export function loadConfig(cwd: string): Config {
 	return {
 		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
 		askClaudeDeprecationShown: project.askClaudeDeprecationShown ?? global.askClaudeDeprecationShown,
-		askClaude: { ...global.askClaude, ...project.askClaude },
-		provider: { ...global.provider, ...project.provider },
+		askClaude: { ...global.askClaude },
+		provider: { ...global.provider },
 	};
 }

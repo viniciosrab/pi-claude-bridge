@@ -18,7 +18,7 @@ The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai
 
 ## Configuration
 
-Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config directory, usually `.pi/claude-bridge.json` (project; merged over global).
+Config: `~/.pi/agent/claude-bridge.json` (global). `provider` and `askClaude` in a project's `.pi/claude-bridge.json` are ignored, so a cloned repository cannot change them. Set `CLAUDE_BRIDGE_CONFIG` to a file path to use that file as the global config instead.
 
 ```json
 {
@@ -54,7 +54,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
-- `loadClaudeSettings` — set `false` to skip Claude Code's `settings.json` hooks and plugins on each turn (default `true`). It also drops `env` and `apiKeyHelper` from those settings.
+- `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none on provider turns. AskClaude always keeps `~/.claude/settings.json` and, with `"all"`, adds only the repository's `.claude/settings.json`.
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
 
 

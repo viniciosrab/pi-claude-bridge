@@ -16,7 +16,7 @@ import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
-import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
+import { askClaudeSettingSources, rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
@@ -933,8 +933,13 @@ let queryImpl: typeof query = query;
 queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
 if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 
+// AskClaude's query(), or a test double (see setAskClaudeQuery).
+let askClaudeQueryImpl: typeof query = query;
+
 // @internal
 export const __test = {
+	setAskClaudeQuery(fn: typeof query | null) { askClaudeQueryImpl = fn ?? query; },
+	promptAndWait: (...args: Parameters<typeof promptAndWait>) => promptAndWait(...args),
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
 		queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
@@ -2321,7 +2326,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// + per-project) and .mcp.json. Since pi executes tools (not CC), those are pure
 	// token overhead. --strict-mcp-config tells the binary to use ONLY mcpServers passed
 	// programmatically and ignore filesystem MCP entries — applied unconditionally because
-	// settingSources is left at CC's default, which loads all sources.
+	// the user's settings are loaded (see providerSettingSourcesOption in fork.ts).
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
@@ -2336,7 +2341,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// Suppress claude.ai cloud MCP servers (Figma/Canva/etc. auto-discovered via OAuth
 	// when the user is logged into Anthropic). These are a separate code path from
-	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources=undefined.
+	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources.
 	// The native CC binary gates them on env var ENABLE_CLAUDEAI_MCP_SERVERS: setting it
 	// to "0"/"false"/"no"/"off" makes the loader return early before any cloud fetch.
 	// DISABLE_AUTO_COMPACT=1: pi owns context-management and propagates its own
@@ -2657,7 +2662,7 @@ async function promptAndWait(
 	// removes the Skill tool and the listing with it — but AskClaude runs on CC's native
 	// tools, so it has to be asked for. Pi-side skills still arrive via skillsBlock below,
 	// which is meant to be the only channel.
-	const sdkQuery = query({
+	const sdkQuery = askClaudeQueryImpl({
 		prompt,
 		options: {
 			cwd,
@@ -2671,7 +2676,7 @@ async function promptAndWait(
 			// without the tool and permission guidance the bridge relies on everywhere else.
 			// Whether pi has skills to append is unrelated to whether the child needs that.
 			systemPrompt: { type: "preset", preset: "claude_code", append: skillsBlock },
-			settingSources: ["user", "project"] as SettingSource[],
+			settingSources: askClaudeSettingSources(providerSettings),
 			extraArgs,
 			...(resumeSessionId ? { resume: resumeSessionId } : {}),
 			...(options?.isolated ? { persistSession: false } : {}),
