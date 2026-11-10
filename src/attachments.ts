@@ -101,8 +101,14 @@ export function collectCarriedAttachments(records: readonly JsonlRecord[]): Carr
  *
  * Deliberately conservative: attaching a file to the wrong turn tells the model it
  * saw something at a point it did not, which is worse than the loss this exists to
- * prevent. So the ordinal has to land on a prompt whose text still matches; any
+ * prevent. So an attachment lands only on a prompt whose text still matches; any
  * disagreement is reported and dropped rather than approximated.
+ *
+ * The ordinal is where the search starts, not an exact address: Claude Code stores a
+ * turn of several pi user messages as one prompt record, and the bridge's own
+ * continuation prompts exist only in its file, so later ordinals drift either way.
+ * Prompts are matched in order, and a text that more than one remaining prompt
+ * carries is dropped as ambiguous rather than guessed.
  */
 export function placeCarriedAttachments(
 	carried: readonly CarriedAttachment[],
@@ -118,18 +124,35 @@ export function placeCarriedAttachments(
 
 	const attachments: ImportAttachment[] = [];
 	const skipped: string[] = [];
-	for (const item of carried) {
+	// The last prompt matched, and the ordinal it was matched for: attachments of one
+	// parent share it, and a later parent has to sit after it.
+	let lastOrdinal = -1;
+	let lastPos = -1;
+	for (const item of [...carried].sort((a, b) => a.userOrdinal - b.userOrdinal)) {
 		const name = String(item.attachment.filename ?? item.attachment.type);
-		const candidate = prompts[item.userOrdinal];
-		if (!candidate) {
-			skipped.push(`${name}: prompt #${item.userOrdinal} is no longer in history`);
+		let pos = -1;
+		if (item.userOrdinal === lastOrdinal && lastPos !== -1) pos = lastPos;
+		else if (item.userOrdinal > lastPos && prompts[item.userOrdinal]?.text === item.parentText) pos = item.userOrdinal;
+		else {
+			// Off its ordinal, a text is trusted only when exactly one prompt after the last
+			// match carries it: picking between equal prompts could move the file to a turn
+			// that never saw it.
+			const matches = prompts.flatMap((p, i) => (i > lastPos && p.text === item.parentText ? [i] : []));
+			if (matches.length > 1) {
+				skipped.push(`${name}: prompt #${item.userOrdinal} matches ${matches.length} prompts`);
+				continue;
+			}
+			pos = matches[0] ?? -1;
+		}
+		if (pos === -1) {
+			skipped.push(prompts[item.userOrdinal]
+				? `${name}: prompt #${item.userOrdinal} changed`
+				: `${name}: prompt #${item.userOrdinal} is no longer in history`);
 			continue;
 		}
-		if (candidate.text !== item.parentText) {
-			skipped.push(`${name}: prompt #${item.userOrdinal} changed`);
-			continue;
-		}
-		attachments.push({ afterIndex: candidate.index, attachment: item.attachment });
+		lastOrdinal = item.userOrdinal;
+		lastPos = pos;
+		attachments.push({ afterIndex: prompts[pos].index, attachment: item.attachment });
 	}
 	return { attachments, skipped };
 }

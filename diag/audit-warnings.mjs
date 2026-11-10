@@ -42,10 +42,10 @@ if (Number.isNaN(since)) {
 // the check red forever. Everything is still printed — only the exit narrows.
 const inWindow = (iso) => since === null || Date.parse(iso) >= since;
 // Same resolution as src/log-paths.ts, without pulling pi's runtime into a diag
-// script: PI_CODING_AGENT_DIR wins, ~/.pi/agent is only the default.
+// script: CLAUDE_BRIDGE_DEBUG_PATH wins, then PI_CODING_AGENT_DIR; ~/.pi/agent is only the default.
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const logPath = args.filter((a, i) => !a.startsWith("--") && i !== sinceArg + 1)[0]
-	?? join(agentDir, "claude-bridge.log");
+	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge.log"));
 
 function run() {
 	let text;

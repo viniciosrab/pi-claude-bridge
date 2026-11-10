@@ -9,8 +9,8 @@
 // returned) so the extension always starts.
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
 
 export interface Config {
 	/** Date (YYYY-MM-DD) the one-time startup notice was shown. Written by the extension, not the user. */
@@ -35,7 +35,11 @@ export interface Config {
 export function tryParseJson(path: string): Partial<Config> {
 	if (!existsSync(path)) return {};
 	try {
-		return JSON.parse(readFileSync(path, "utf-8"));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		// Valid JSON is not necessarily a config: `null` would throw at the first field read.
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Partial<Config>;
+		console.error(`claude-bridge: ignoring ${path}, it is not a JSON object`);
+		return {};
 	} catch (e) {
 		console.error(`claude-bridge: failed to parse ${path}: ${e}`);
 		return {};
@@ -72,9 +76,45 @@ export function markStartupNoticeShown(): string {
 	}
 	// en-CA renders YYYY-MM-DD in local time; toISOString() would report UTC.
 	const next = { ...existing, startupNoticeShown: new Date().toLocaleDateString("en-CA") };
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`);
+	// Temp file and rename: writing in place empties the user's config first, and a pi
+	// starting in that moment would read it as unparseable and run without its settings.
+	// The rename lands on the symlink's target, with its permissions, so a config kept in
+	// a dotfiles repo stays linked and a private one stays private. Best effort, like the
+	// parse failure above: a config that cannot be rewritten only shows the notice again.
+	let tmp: string | undefined;
+	try {
+		const target = writeTarget(path);
+		mkdirSync(dirname(target), { recursive: true });
+		const mode = existsSync(target) ? statSync(target).mode & 0o777 : undefined;
+		tmp = `${target}.${process.pid}.tmp`;
+		// Owner-only while the contents land, so a private config is never readable in
+		// between; then the target's own mode, set explicitly because the umask masks
+		// writeFileSync's mode.
+		writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+		if (mode !== undefined) chmodSync(tmp, mode);
+		renameSync(tmp, target);
+	} catch (e) {
+		if (tmp) rmSync(tmp, { force: true });
+		console.error(`claude-bridge: could not record the startup notice in ${path}: ${e}`);
+	}
 	return path;
+}
+
+/** The file a rewrite of `path` must replace: the end of its symlink chain, also a chain
+ *  whose last target does not exist yet, so the rename never replaces a link. */
+function writeTarget(path: string): string {
+	if (existsSync(path)) return realpathSync(path);
+	let target = path;
+	// A bound, like the kernel's, so a link cycle cannot loop forever.
+	for (let hops = 0; hops < 40; hops++) {
+		try {
+			if (!lstatSync(target).isSymbolicLink()) break;
+		} catch {
+			break; // the chain ends at a file that does not exist yet
+		}
+		target = resolve(dirname(target), readlinkSync(target));
+	}
+	return target;
 }
 
 /** The notice for a user whose global config still turns on the removed AskClaude tool,

@@ -13,7 +13,7 @@ import { getAgentDir, type ExtensionUIContext } from "@earendil-works/pi-coding-
 import { getClaudeDir, getSessionPath } from "cc-session-io";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { sessionCwdFor } from "./session-cwd.js";
@@ -579,12 +579,18 @@ function pruneMirrors(now: number): void {
  *  failure only means the next process rebuilds, as before. */
 export function saveMirror(piSessionId: string, record: Omit<MirrorRecord, "pid">, now = Date.now()): void {
 	try {
-		mkdirSync(mirrorDir(), { recursive: true });
+		// Owner-only, like the capture store: an aborted turn's record holds its prompt.
+		mkdirSync(mirrorDir(), { recursive: true, mode: 0o700 });
+		// mkdir's mode applies only on creation: tighten a directory an older version made.
+		// Best effort on its own: a filesystem that refuses chmod must not stop the save.
+		try { chmodSync(mirrorDir(), 0o700); } catch {}
 		pruneMirrors(now);
 		const file = mirrorPath(piSessionId);
 		const turns = turnBoundaries(readMirror(piSessionId), record);
-		writeFileSync(`${file}.tmp`, JSON.stringify({ ...record, pid: process.pid, ...(turns.length ? { turns } : {}) }));
-		renameSync(`${file}.tmp`, file);
+		// A temp name per process: two windows saving one session must not write one temp file.
+		const tmp = `${file}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify({ ...record, pid: process.pid, ...(turns.length ? { turns } : {}) }), { mode: 0o600 });
+		renameSync(tmp, file);
 	} catch {}
 }
 

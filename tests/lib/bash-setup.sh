@@ -62,7 +62,7 @@ require_env() {
 	local var="$1"
 	local val="${!var:-}"
 	if [[ -z "$val" ]]; then
-		echo "ERROR: $var not set (see .env.test)"
+		echo "ERROR: $var not set (see .env.test)" >&2
 		exit 1
 	fi
 	echo "$val"

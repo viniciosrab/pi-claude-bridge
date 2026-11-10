@@ -79,6 +79,11 @@ describe("verifyWrittenSession", () => {
 		assert.match(warnings[0], /sessionId drift/);
 	});
 
+	it("no warnings for an empty file when no records were expected", () => {
+		writeFileSync(path, "");
+		assert.deepEqual(verifyWrittenSession(path, SID, 0), []);
+	});
+
 	it("warns on malformed JSONL", () => {
 		writeFileSync(path, "not json\n");
 		const warnings = verifyWrittenSession(path, SID, 1);

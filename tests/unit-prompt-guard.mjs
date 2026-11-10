@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PI_PREAMBLE, projectPromptCapture, PromptCaptures } from "../src/prompt-capture.js";
+import { PI_PREAMBLES_SINCE_1_5 } from "../src/fork-prompt-guard.js";
 
 const PI_SYSTEM_PROMPT = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js", import.meta.url));
 
@@ -94,9 +95,13 @@ describe("prompt guard", () => {
 		);
 		const { buildSystemPrompt } = await import(PI_SYSTEM_PROMPT);
 		const harness = buildSystemPrompt({ cwd: "/tmp" });
+		// Since pi 1.5 the preamble guard that matches is the fork's (PI_PREAMBLES_SINCE_1_5);
+		// upstream's PI_PREAMBLE only covers pi < 1.5. Pin the marker pi renders at a line start,
+		// which is where both guards look.
+		const atLineStart = (preamble) => harness.startsWith(preamble) || harness.includes(`\n${preamble}`);
 		assert.ok(
-			harness.includes(PI_PREAMBLE),
-			"pi reworded its preamble, so the harness guard matches nothing; update PI_PREAMBLE in src/prompt-capture.ts",
+			PI_PREAMBLES_SINCE_1_5.some(atLineStart),
+			`pi reworded its preamble, so the harness guard matches nothing; add the new wording to PI_PREAMBLES_SINCE_1_5 in src/fork-prompt-guard.ts. pi's prompt now opens: ${JSON.stringify(harness.split("\n")[0])}`,
 		);
 		for (const trigger of ["docs/custom-provider.md", "docs/packages.md"]) {
 			assert.ok(
@@ -108,7 +113,7 @@ describe("prompt guard", () => {
 		// presence mean "this prompt carries pi's harness or its gate fingerprint".
 		const custom = buildSystemPrompt({ cwd: "/tmp", customPrompt: "custom" });
 		assert.ok(
-			!custom.includes(PI_PREAMBLE) && !custom.includes("docs/packages.md"),
+			![PI_PREAMBLE, ...PI_PREAMBLES_SINCE_1_5].some((preamble) => custom.includes(preamble)) && !custom.includes("docs/packages.md"),
 			"pi now emits its harness alongside a custom prompt, so these strings no longer imply a leak",
 		);
 	});

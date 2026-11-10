@@ -860,10 +860,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
 	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
-	if (preserveId) {
-		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
-		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
-	}
+	// createSession and the import only build records in memory, so a history that
+	// cannot be converted throws here while the old file is still intact.
 	const session = createSession({
 		projectPath: cwd,
 		claudeDir: process.env.CLAUDE_CONFIG_DIR,
@@ -871,7 +869,18 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		...(modelId ? { model: modelId } : {}),
 	});
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, carried);
-	session.save();
+	if (preserveId) {
+		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
+		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
+	}
+	try {
+		session.save();
+	} catch (error) {
+		// The old file may be gone and the new one is not whole: no state may name either.
+		setSessionStateFor(piSessionId, null);
+		if (piSessionId) dropMirror(piSessionId);
+		throw error;
+	}
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
@@ -1209,7 +1218,7 @@ const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"])
 // level CC accepts.
 function effortForReasoning(model: Model<any>, reasoning: string | undefined): EffortLevel | undefined {
 	if (!reasoning) return undefined;
-	const mapped = model.thinkingLevelMap?.[reasoning];
+	const mapped = levelMap(model)?.[reasoning];
 	if (mapped === undefined) return REASONING_TO_EFFORT[reasoning];
 	return VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined;
 }
@@ -1219,8 +1228,17 @@ function effortForReasoning(model: Model<any>, reasoning: string | undefined): E
 // provider does: for reasoning models, unless the model's thinkingLevelMap marks
 // "off" unsupported (null), as on models that always think.
 function thinkingForReasoning(model: Model<any>, reasoning: string | undefined): ThinkingConfig | undefined {
-	if (reasoning || !model.reasoning || model.thinkingLevelMap?.off === null) return undefined;
+	if (reasoning || !model.reasoning || levelMap(model)?.off === null) return undefined;
 	return { type: "disabled" };
+}
+
+// pi-ai 1.5 declares Model.thinkingLevelMap through pi-schema's Static, which
+// resolves to `unknown` under this tsconfig. Read it with the shape pi-ai's
+// ThinkingLevelMapSchema declares (level -> provider string, or null when the
+// level is unsupported). Type-only: the value is used as is.
+type ThinkingLevelMapShape = Partial<Record<string, string | null>>;
+function levelMap(model: Model<any>): ThinkingLevelMapShape | undefined {
+	return model.thinkingLevelMap as ThinkingLevelMapShape | undefined;
 }
 
 // --- Provider helpers: misc ---
@@ -1726,8 +1744,11 @@ async function consumeQuery(
 			case "result": {
 					// The failure itself was recorded above the guard, along with the served
 					// context window. What is left here is the success path: push the result
-					// text when no assistant message already delivered it.
-					if (resultError === undefined && !queryCtx.turnSawStreamEvent && message.subtype === "success") {
+					// text when no assistant message already delivered it. A text block already in
+					// the turn is that delivery: an answer that came only as an assistant message
+					// (a fallback before any stream event) sees no stream event either.
+					const textDelivered = queryCtx.turnBlocks.some((b: any) => b.type === "text");
+					if (resultError === undefined && !queryCtx.turnSawStreamEvent && !textDelivered && message.subtype === "success") {
 					ensureTurnStarted(queryCtx);
 					const text = message.result || "";
 					queryCtx.turnBlocks.push({ type: "text", text });

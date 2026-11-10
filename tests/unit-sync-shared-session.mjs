@@ -145,6 +145,36 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// A rebuild used to delete the old file before converting pi's history, so a
+	// conversion that throws left no session file behind, with the state still naming it.
+	it("keeps the old session file when a rebuild cannot convert the history", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const claudeDir = process.env.CLAUDE_CONFIG_DIR;
+		try {
+			const t = Date.now();
+			const first = __test.syncSharedSession([
+				{ role: "user", content: "hello", timestamp: t },
+				{ role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: t + 1 },
+				{ role: "user", content: "next", timestamp: t + 2 },
+			], cwd, undefined, undefined, "s-keep");
+			assert.ok(first.sessionId);
+			const before = openSession({ sessionId: first.sessionId, projectPath: cwd, claudeDir }).records.length;
+			assert.ok(before > 0);
+
+			__test.markRebuildForSession("s-keep", "test");
+			assert.throws(() => __test.syncSharedSession([
+				{ role: "user", content: "hello", timestamp: t },
+				{ role: "assistant", content: [{ type: "toolCall", id: "toolu_1", name: "mcp__custom-tools__bash", arguments: {} }], timestamp: t + 1 },
+				{ role: "toolResult", toolCallId: "toolu_1", toolName: "mcp__custom-tools__bash", content: [{ type: "text", text: "ok" }], isError: false, timestamp: t + 2 },
+				{ role: "user", content: "next", timestamp: t + 3 },
+			], cwd, undefined, undefined, "s-keep"), /already an SDK tool name/);
+
+			assert.equal(openSession({ sessionId: first.sessionId, projectPath: cwd, claudeDir }).records.length, before);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The rebuilt file holds one line per record, and a carried `@file` expansion
 	// is an `attachment` record — which `session.messages` filters out. Counting
 	// messages told every user who at-mentioned a file before switching providers
