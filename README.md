@@ -1,6 +1,6 @@
 # pi-claude-bridge
 
-[![npm version](https://img.shields.io/npm/v/@viniciosrab/pi-claude-bridge)](https://www.npmjs.com/package/@viniciosrab/pi-claude-bridge)
+[![GitHub tag](https://img.shields.io/github/v/tag/viniciosrab/pi-claude-bridge)](https://github.com/viniciosrab/pi-claude-bridge/tags)
 
 Use Claude (Fable, Opus, Sonnet, Haiku) as a model in [pi](https://github.com/earendil-works/pi), through your Claude Code subscription. Every tool call runs in pi's TUI, as with any other model.
 
@@ -12,9 +12,13 @@ What it does for you:
 
 ## Install
 
+Install it straight from this repository:
+
 ```
-pi install npm:@viniciosrab/pi-claude-bridge
+pi install git:github.com/viniciosrab/pi-claude-bridge
 ```
+
+This follows the default branch, and `pi update --extensions` pulls the latest commit. To stay on a release instead, pin its tag, e.g. `pi install git:github.com/viniciosrab/pi-claude-bridge@v1.0.0`.
 
 Requires pi 0.86.1 or newer and a Claude Code login: install [Claude Code](https://code.claude.com/docs/en/quickstart), run `claude` and sign in with your Claude subscription when it asks (`/login` signs in again later). The bridge uses that login, so there is no API key to set.
 
