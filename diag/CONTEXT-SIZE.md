@@ -67,6 +67,10 @@ the footnote below the table).
 | `claude-fable-5[1m]`     | 429§             | 1M              | —                | —               |
 | `claude-fable-5-2`        | 200K¶            | —               | —                | —               |
 | `claude-fable-5-2[1m]`   | 1M¶              | —               | —                | —               |
+| `claude-mythos-5-2`       | —                | —               | 1M‡              | —               |
+| `claude-mythos-5-2[1m]`  | —                | —               | 1M‡              | —               |
+| `claude-mythos-5-1`       | —                | —               | 1M‡              | —               |
+| `claude-mythos-5-1[1m]`  | —                | —               | 1M‡              | —               |
 | `claude-sonnet-5`         | 1M§              | 1M              | —                | —               |
 | `claude-sonnet-5[1m]`    | 1M               | 1M              | —                | —               |
 | `claude-sonnet-4-6`       | 200K             | 200K            | 200K             | 200K            |
@@ -115,6 +119,13 @@ credits: bare served 200K and `[1m]` 1M, both with 32K max output, the
 default Claude Code 2.1.308 applies to a model it does not know. The same probe
 against a Claude Code 2.1.321 binary (`pathToClaudeCodeExecutable`) served 1M
 from both ids, with 128K max output.
+
+‡ **Measured upstream (elidickinson/pi-claude-bridge#259), 2026-11-10, Max with
+no Extra Usage credits, SDK 0.3.321 / Claude Code 2.1.321.** Mythos 5.2 and 5.1
+serve 1M from both the bare id and `[1m]`, like Fable 5.2 in the same run, and
+Claude Code reports the same max output as each Fable sibling: 128K for Mythos
+5.2, 64K for Mythos 5.1. Mythos is access-gated, so the Pro columns can only be
+filled by an account in one of Anthropic's programs.
 
 ## Error shapes
 

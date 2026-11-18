@@ -10,6 +10,8 @@ Behind the scenes, pi's tools are bridged to Claude Code but everything works li
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
+Claude Mythos 5.2 and 5.1 are listed too (at the bottom), though pi-ai leaves them out; each copies the limits of its Fable sibling. Anthropic serves Mythos only to approved programs, so on accounts without access requests fail with a 404 "There's an issue with the selected model".
+
 **1M Context:** Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 get 1M context. Opus 4.6 gets 1M only on a Max plan or with Extra Usage, and Sonnet 4.6 only with Extra Usage — set `provider.plan` and/or `provider.longContextExtraUsage` as described in [Configuration](#configuration).
 
 ## Configuration
