@@ -99,6 +99,9 @@ export class QueryContext {
 	/** The model of the latest switch sent to this query and not yet settled: the model
 	 *  CC will serve once it lands, so the next boundary compares against it. */
 	switchingTo: Model<any> | null = null;
+	/** The thinking config this query was started with, serialized. Claude Code keeps
+	 *  it for the whole query: setMaxThinkingTokens does not reach a turn under way. */
+	startThinking = "null";
 	/** pi rewrote the history this query was built from (session_compact,
 	 *  session_tree in its own pi session). Set by markRebuildForSession, consumed
 	 *  by the tool-result delivery that discards the query. Not session-wide state:

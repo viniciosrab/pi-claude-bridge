@@ -50,6 +50,9 @@ const tools = [{ name: "read", description: "Read a file", parameters: { type: "
 
 const started = [];
 const setModels = [];
+/** applyFlagSettings calls, with the setModel count at the time. */
+const flagSettings = [];
+let flagDelayMs = 0;
 let release;
 let release2;
 /** A query that makes a second tool call after the first result. */
@@ -65,6 +68,8 @@ beforeEach(() => {
 	activeQueryContexts.clear();
 	started.length = 0;
 	setModels.length = 0;
+	flagSettings.length = 0;
+	flagDelayMs = 0;
 	setModelFails = false;
 	setModelDelayMs = 5;
 	secondTool = false;
@@ -103,6 +108,7 @@ beforeEach(() => {
 			resultsAtSwitch.push(ctx().pendingResults.size);
 			if (setModelFails) throw new Error("setModel refused");
 		};
+		gen.applyFlagSettings = async (settings) => { if (flagDelayMs) await new Promise((r) => setTimeout(r, flagDelayMs)); flagSettings.push({ settings, afterSetModels: setModels.length, resultsQueued: ctx().pendingResults.size }); };
 		gen.interrupt = async () => {};
 		gen.close = () => onClose();
 		return gen;
@@ -252,4 +258,57 @@ it("a switch landing after the old model's response started, before its first bl
 	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
 	assert.equal(continued.model, first.id, "the old model served the response it had started");
 	assert.equal(continued.provider, first.provider);
+});
+
+const byId = (id) => providerConfig.models.find((m) => m.id === id);
+
+/** Parks on `from`, then delivers the tool result under `to`, both at pi reasoning `reasoning`. */
+async function switchWith(sid, from, to, reasoning) {
+	const ask = user("read a");
+	const parked = await streamSimple(from, { messages: [ask], tools }, { sessionId: sid, reasoning, signal: new AbortController().signal }).result();
+	const continuation = streamSimple(to, { messages: [ask, parked, toolResult], tools }, { sessionId: sid, reasoning, signal: new AbortController().signal });
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	return { ask, parked, continued: await continuation.result() };
+}
+
+it("sets the effort the bridge computes for the new model, after the switch and before the result", async () => {
+	const { continued } = await switchWith("pi-effort", byId("claude-fable-5-2"), byId("claude-fable-5-1"), "high");
+	assert.equal(setModels.length, 1);
+	assert.deepEqual(flagSettings, [{ settings: { effortLevel: "high" }, afterSetModels: 1, resultsQueued: 0 }]);
+	assert.equal(continued.model, "claude-fable-5-1");
+});
+
+it("restores the new model's default effort when the bridge computes none for it", async () => {
+	// Thinking off: Fable always thinks (no "off"), so the bridge sends no effort and no thinking config.
+	const { continued } = await switchWith("pi-no-effort", byId("claude-fable-5-2"), byId("claude-fable-5-1"), undefined);
+	assert.equal(setModels.length, 1);
+	assert.deepEqual(flagSettings.map((f) => f.settings), [{ effortLevel: null }]);
+	assert.equal(continued.model, "claude-fable-5-1");
+});
+
+it("does not switch mid-turn when the new model needs other thinking settings; the next prompt does", async () => {
+	// Thinking off: Haiku 5.5 runs with thinking disabled, Opus 5.5 cannot disable it, and
+	// a running query keeps the thinking it started with.
+	const haiku = byId("claude-haiku-5-5");
+	const opus = byId("claude-opus-5-5");
+	const { ask, parked, continued } = await switchWith("pi-thinking", haiku, opus, undefined);
+	assert.deepEqual(setModels, [], "no switch");
+	assert.deepEqual(flagSettings, []);
+	assert.equal(continued.model, haiku.id, "labeled with the model that served it");
+	const next = await streamSimple(opus, { messages: [ask, parked, toolResult, continued, user("again")], tools },
+		{ sessionId: "pi-thinking", signal: new AbortController().signal }).result();
+	assert.equal(started.length, 2, "the next prompt opened a fresh query");
+	assert.match(started[1], escape(opus.id));
+	assert.equal(next.model, opus.id);
+});
+
+it("labels the continuation with the new model once setModel lands, even when the effort call outlasts the wait", async () => {
+	mod.__test.setSwitchModelWaitMs(30);
+	flagDelayMs = 150;
+	const { continued } = await switchWith("pi-slow-effort", byId("claude-fable-5-2"), byId("claude-fable-5-1"), "high");
+	assert.equal(setModels.length, 1, "the model switched before the results went in");
+	assert.equal(continued.model, "claude-fable-5-1", "the new model served the continuation");
+	await new Promise((r) => setTimeout(r, 200));
+	assert.deepEqual(flagSettings.map((f) => f.settings), [{ effortLevel: "high" }], "the effort still went through");
 });
