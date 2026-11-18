@@ -2004,9 +2004,11 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, waitMs = s
 		if (c.activeQuery !== q) return;
 		debug(`provider: switched the running query from ${served?.id ?? "?"} to ${cliModel} at a tool result`);
 		c.servedModel = model;
-		// Relabel only a turn whose response has not started: one already streaming or
-		// ended (the message pi recorded) was served by the model before the switch.
-		if (c.currentPiStream && !c.turnStarted && c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+		// Relabel only a turn whose response has not started: one already under way (a
+		// message_start or a non-streaming answer, even before its first block) or ended
+		// (the message pi recorded) was served by the model before the switch.
+		const responseStarted = c.turnStarted || c.turnSawStreamEvent || c.turnFallbackMessageId !== undefined;
+		if (c.currentPiStream && !responseStarted && c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
 	})();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });

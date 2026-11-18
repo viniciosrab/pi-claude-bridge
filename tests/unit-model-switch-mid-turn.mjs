@@ -54,6 +54,8 @@ let release;
 let release2;
 /** A query that makes a second tool call after the first result. */
 let secondTool = false;
+/** The continuation pauses this long after its message_start (a slow first token). */
+let pauseAfterStartMs = 0;
 let setModelFails = false;
 let setModelDelayMs = 5;
 /** Results the bridge had handed the query when each setModel call was made. */
@@ -66,6 +68,7 @@ beforeEach(() => {
 	setModelFails = false;
 	setModelDelayMs = 5;
 	secondTool = false;
+	pauseAfterStartMs = 0;
 	mod.__test.setSwitchModelWaitMs(null);
 	resultsAtSwitch.length = 0;
 	setQuery(({ prompt, options }) => {
@@ -86,7 +89,10 @@ beforeEach(() => {
 					for (const step of toolUse) yield JSON.parse(JSON.stringify(step).replaceAll("toolu_1", "toolu_2").replaceAll("msg_tool", "msg_tool_2"));
 					if (await Promise.race([gate2, killed]) === "killed") return;
 				}
-				for (const step of answer("continued")) yield step;
+				const [start, ...rest] = answer("continued");
+				yield start;
+				if (pauseAfterStartMs) await new Promise((r) => setTimeout(r, pauseAfterStartMs));
+				for (const step of rest) yield step;
 			} else {
 				for (const step of answer("fresh")) yield step;
 			}
@@ -235,4 +241,15 @@ it("a model requested again while a switch is still pending is switched to, not 
 	assert.match(setModels[0], escape(second.id));
 	assert.match(setModels[1], escape(first.id));
 	assert.equal(done.model, first.id, "the last request won");
+});
+
+it("a switch landing after the old model's response started, before its first block, does not relabel it", async () => {
+	mod.__test.setSwitchModelWaitMs(20);
+	setModelDelayMs = 100;
+	pauseAfterStartMs = 250;
+	const { continued } = await switchAtToolResult("pi-started");
+	assert.equal(setModels.length, 1, "the switch landed during the response");
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	assert.equal(continued.model, first.id, "the old model served the response it had started");
+	assert.equal(continued.provider, first.provider);
 });
