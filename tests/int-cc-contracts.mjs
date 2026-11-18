@@ -907,13 +907,14 @@ test("a turn that ends at a tool result continues with no prompt on stdin, via C
 		let release;
 		const held = new Promise((resolve) => { release = resolve; });
 		async function* noPrompt() { await held; }
-		const q = query({ prompt: noPrompt(), options: providerOptions({ cwd, resume: continued.sessionId, maxTurns: 1,
+		const q = query({ prompt: noPrompt(), options: providerOptions({ cwd, resume: continued.sessionId, maxTurns: 1, includePartialMessages: true,
 			env: env({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", CLAUDE_CODE_RESUME_PROMPT: "PI-CONTINUE-META", CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "0" }) }) });
 		const seen = [];
 		let result = null;
 		const giveUp = setTimeout(release, 60_000);
 		for await (const message of q) {
-			seen.push(message.type === "user" ? { type: "user", isReplay: message.isReplay, isSynthetic: message.isSynthetic, text: JSON.stringify(message.message?.content).slice(0, 120) } : { type: message.type, subtype: message.subtype });
+			seen.push(message.type === "user" ? { type: "user", isReplay: message.isReplay, isSynthetic: message.isSynthetic, text: JSON.stringify(message.message?.content).slice(0, 120) }
+				: { type: message.type, subtype: message.subtype, status: message.status, event: message.event?.type });
 			if (message.type === "result" && result === null) { result = message; release(); }
 		}
 		clearTimeout(giveUp);
@@ -930,7 +931,11 @@ test("a turn that ends at a tool result continues with no prompt on stdin, via C
 		assert.ok(meta, "CC did not record the continue text in the session");
 		assert.equal(meta.isMeta, true, "the continue text is no longer a meta record: the bridge's abort and error marks look for it as a plain prompt");
 		assert.equal(written.at(-1).type, "assistant", "the continued turn's answer is not the session's last record");
-		console.log(`[contract #274] stream: ${JSON.stringify(seen)}`);
+		// The bridge's 30 s fallback counts status "requesting" as CC working on the turn, so
+		// a slow first response is not mistaken for a CC that saw no turn to run.
+		const requesting = seen.findIndex((m) => m.type === "system" && m.subtype === "status" && m.status === "requesting");
+		const firstEvent = seen.findIndex((m) => m.type === "stream_event");
+		assert.ok(requesting !== -1 && requesting < firstEvent, `CC no longer reports status "requesting" before the continued turn's first stream event; src/index.ts showsTurnWork relies on it. Saw ${JSON.stringify(seen.filter((m) => m.type !== "stream_event"))}`);
 	} finally {
 		api.close();
 		for (const id of sessionIds) deleteSession(id, cwd, process.env.CLAUDE_CONFIG_DIR);

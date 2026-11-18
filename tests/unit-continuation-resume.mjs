@@ -154,6 +154,31 @@ describe("continuation at a tool result with no parked query (upstream #274)", (
 		assert.deepEqual(calls[0].stdin, []);
 	});
 
+	for (const [what, signal] of [
+		["system status requesting", { type: "system", subtype: "status", status: "requesting" }],
+		["system status compacting", { type: "system", subtype: "status", status: "compacting" }],
+		["session state running", { type: "system", subtype: "session_state_changed", state: "running" }],
+	]) {
+		it(`writes nothing on stdin when Claude Code reports ${what} and its first stream event comes after the fallback`, async () => {
+			// CC 2.1.327 emits status "requesting" right before the API call of the turn it
+			// resumes; a slow first response (a cold cache on a long history) is not a silent CC.
+			scripts.push({ label: "slow-start", steps: [init("cc-slow-start"), signal, () => sleep(FALLBACK_MS * 3), ...text("late answer"), result("late answer")] });
+			const reply = await call(`pi-slow-${what.replaceAll(" ", "-")}`, atToolResult("toolu_3b")).result();
+
+			assert.equal(replyText(reply), "late answer");
+			assert.deepEqual(calls[0].stdin, []);
+		});
+	}
+
+	it("still writes the continue prompt when Claude Code reports only an idle state", async () => {
+		scripts.push({ label: "idle", steps: [{ type: "system", subtype: "session_state_changed", state: "idle" }, { type: "system", subtype: "status", status: null },
+			(c) => c.firstStdin, init("cc-idle"), ...text("after prompt"), result("after prompt")] });
+		const reply = await call("pi-idle", atToolResult("toolu_3c")).result();
+
+		assert.equal(replyText(reply), "after prompt");
+		assert.deepEqual(calls[0].stdin, [CONTINUE_AFTER_RESUME]);
+	});
+
 	it("an ordinary prompt never carries the resume variables, even when pi's environment has them", async () => {
 		const saved = { turn: process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN, prompt: process.env.CLAUDE_CODE_RESUME_PROMPT };
 		process.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = "1";

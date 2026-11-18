@@ -1739,11 +1739,17 @@ function failRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; 
 }
 
 /** Whether `message` shows Claude Code working on the turn: model output, the turn's
- *  end, or an API retry. Init, hooks and other bookkeeping come before CC has decided
- *  whether there is a turn to run at all. */
+ *  end, an API retry, or a request or compaction under way (status "requesting",
+ *  which CC 2.1.327 emits right before the API call of the turn it resumes, so a slow
+ *  first response is not taken for a silent CC), or the session running. Init, hooks
+ *  and an idle state come before CC has decided whether there is a turn to run at all. */
 function showsTurnWork(message: SDKMessage): boolean {
-	return message.type === "stream_event" || message.type === "assistant" || message.type === "result"
-		|| (message.type === "system" && (message as { subtype?: string }).subtype === "api_retry");
+	if (message.type === "stream_event" || message.type === "assistant" || message.type === "result") return true;
+	if (message.type !== "system") return false;
+	const m = message as { subtype?: string; status?: unknown; state?: unknown };
+	return m.subtype === "api_retry"
+		|| (m.subtype === "status" && (m.status === "requesting" || m.status === "compacting"))
+		|| (m.subtype === "session_state_changed" && m.state === "running");
 }
 
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
