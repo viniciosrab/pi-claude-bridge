@@ -148,5 +148,10 @@ for (const arm of args) {
 	}
 	appendFileSync(join(OUTDIR, "results.jsonl"), JSON.stringify(record) + "\n");
 	const rl = record.rateLimits.map((r) => `${r.rateLimitType}:${r.status} overageInUse=${r.overageInUse ?? false} isUsingOverage=${r.isUsingOverage}${r.overageDisabledReason ? ` (${r.overageDisabledReason})` : ""}`).join("; ") || "no rate_limit_event";
-	console.log(`${record.arm.padEnd(14)} ${record.isError ? `ERROR ${record.apiErrorStatus ?? ""} ${record.result}` : "ok"} | ${rl} | sdk $${record.sdkCostUsd ?? 0}`);
+	// "ok" only for a successful result: a CLI that never started or an SDK throw before
+	// any result is a failed probe, not a prompt the gate let through.
+	const outcome = record.isError === false ? "ok"
+		: record.isError ? `ERROR ${record.apiErrorStatus ?? ""} ${record.result}`
+		: `FAILED (no result) ${record.thrown ?? ""}`;
+	console.log(`${record.arm.padEnd(14)} ${outcome} | ${rl} | sdk $${record.sdkCostUsd ?? 0}`);
 }

@@ -75,4 +75,4 @@ Before forwarding pi's whole system prompt (upstream #262), the same probe sent 
 
 The whole real prompt also passed once on Opus 5.5. Fable 5.2 answered 429 "requires usage credits" for the control too, so that is the account's model access, not the prompt.
 
-`diag/prompt-churn.mjs` read the prompt captures of the same machine's 555 recent pi sessions: the whole prompt changed 50 times and the portable projection the bridge forwards today 49 times, mostly in the `tools` and `mcp_servers` sections. On this setup, forwarding the whole prompt would change the system block about as often as today's projection does.
+`diag/prompt-churn.mjs` read the prompt captures of the same machine's 555 recent pi sessions (567 on a rerun, same counts whether captures another capture contains are dropped as inherited parents or kept): the whole prompt changed 50 times and the portable projection the bridge forwards today 49 times, mostly in the `tools` and `mcp_servers` sections. On this setup, forwarding the whole prompt would change the system block about as often as today's projection does.
