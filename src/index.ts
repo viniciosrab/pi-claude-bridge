@@ -2604,7 +2604,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 // --- Extension registration ---
 
 export default function (pi: ExtensionAPI) {
-	removeObsoleteCaptureStore(); // fork: obsolete capture store
+	const captureStoreLeft = removeObsoleteCaptureStore(); // fork: obsolete capture store
+	if (captureStoreLeft) debug(`activation: ${captureStoreLeft}`); // fork: obsolete capture store
 	const config = loadConfig();
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};

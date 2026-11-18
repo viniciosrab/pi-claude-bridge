@@ -31,8 +31,8 @@ const harness = createRpcHarness({
 });
 const { startAndWait, stop, send, waitForEvent, waitForMatch, collectText, DEBUG_LOG } = harness;
 
-await startAndWait();
 try {
+	await startAndWait();
 	const collector = collectText();
 	await send({ type: "prompt", message: "Use the sentinel-skill skill and follow its instructions exactly." }, TIMEOUT);
 	await waitForMatch(

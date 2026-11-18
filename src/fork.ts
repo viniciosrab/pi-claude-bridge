@@ -556,9 +556,12 @@ function mirrorDir(): string {
 
 /** Removes `claude-bridge-captures/`, the prompt-capture store an earlier version kept
  *  next to the mirrors (issue #37). It holds prompt text and nothing reads it now that
- *  the whole prompt is forwarded. Best effort: a failure is ignored. */
-export function removeObsoleteCaptureStore(rm: typeof rmSync = rmSync): void {
-	try { rm(join(getAgentDir(), "claude-bridge-captures"), { recursive: true, force: true }); } catch {}
+ *  the whole prompt is forwarded. Best effort: a failure never throws; it is returned
+ *  so the caller can log that the prompt text is still on disk. */
+export function removeObsoleteCaptureStore(rm: typeof rmSync = rmSync): string | undefined {
+	const dir = join(getAgentDir(), "claude-bridge-captures");
+	try { rm(dir, { recursive: true, force: true }); return undefined; }
+	catch (error) { return `could not remove ${dir}: ${(error as Error)?.message ?? error}`; }
 }
 
 function mirrorPath(piSessionId: string): string {
