@@ -904,6 +904,91 @@ test("setModel while a tool call is parked makes the turn's next request use the
 	}
 });
 
+test("at a parked tool call, applyFlagSettings sets the effort of the turn's next request and null restores the model's default; thinking stays as the query started (upstream #273)", { timeout: 120_000 }, async () => {
+	// src/index.ts switches models mid-turn with setModel, then sets the effort the
+	// bridge computes for the new model with applyFlagSettings({ effortLevel }), null
+	// when it computes none. Turning thinking on or off cannot follow: neither
+	// setMaxThinkingTokens nor alwaysThinkingEnabled reaches the turn's next request,
+	// so the bridge does not switch mid-turn when the two models' thinking differs.
+	const requests = [];
+	const server = createServer((req, res) => {
+		const chunks = [];
+		req.on("data", (c) => chunks.push(c));
+		req.on("end", () => {
+			if (!(req.method === "POST" && req.url.startsWith("/v1/messages"))) { res.writeHead(404).end(); return; }
+			const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			const ours = (body.tools ?? []).some((t) => t.name === "mcp__custom-tools__marker");
+			if (ours) requests.push(body);
+			if (!body.stream) {
+				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_validate", type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "OK" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }));
+				return;
+			}
+			const event = (name, obj) => `event: ${name}\ndata: ${JSON.stringify(obj)}\n\n`;
+			// Two tool calls, so the turn parks twice before its answer.
+			const results = (JSON.stringify(body.messages).match(/MARKER_OK/g) ?? []).length;
+			const callTool = ours && results < 2;
+			const block = callTool
+				? [event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_effort_${results}`, name: "mcp__custom-tools__marker", input: {} } }),
+					event("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } })]
+				: [event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+					event("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "OK" } })];
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.end(event("message_start", { type: "message_start", message: { id: `msg_effort_${requests.length}`, type: "message", role: "assistant", content: [], model: body.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } })
+				+ block.join("")
+				+ event("content_block_stop", { type: "content_block_stop", index: 0 })
+				+ event("message_delta", { type: "message_delta", delta: { stop_reason: callTool ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } })
+				+ event("message_stop", { type: "message_stop" }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const parks = [];
+	let wake = () => {};
+	const mcp = new McpServer({ name: "custom-tools", version: "1.0.0" }, { capabilities: { tools: {} } });
+	mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [noArgTool("marker")] }));
+	mcp.server.setRequestHandler(CallToolRequestSchema, () => new Promise((resolve) => {
+		parks.push(() => resolve({ content: [{ type: "text", text: "MARKER_OK" }] }));
+		wake();
+	}));
+	const parked = (n) => new Promise((resolve) => { const check = () => { if (parks.length >= n) resolve(); else wake = check; }; check(); });
+	let close;
+	const held = new Promise((resolve) => { close = resolve; });
+	async function* prompt() {
+		yield { type: "user", message: { role: "user", content: "EFFORT-PROBE" }, parent_tool_use_id: null };
+		await held;
+	}
+	try {
+		const q = query({ prompt: prompt(), options: providerOptions({
+			model: "claude-sonnet-4-6", effort: "low",
+			mcpServers: { "custom-tools": { type: "sdk", name: "custom-tools", instance: mcp } },
+			env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+		}) });
+		const drained = (async () => {
+			for await (const message of q) if (message.type === "result") { close(); return message; }
+		})();
+		await parked(1);
+		await q.setModel("claude-opus-4-6");
+		await q.applyFlagSettings({ effortLevel: "medium" });
+		await q.setMaxThinkingTokens(0);
+		parks[0]();
+		await parked(2);
+		await q.applyFlagSettings({ effortLevel: null });
+		parks[1]();
+		assert.ok(await drained, "the query never finished");
+		assert.equal(requests.length, 3, `expected two tool calls and the answer, got ${requests.length} turn requests`);
+		assert.deepEqual(requests.map((r) => r.model), ["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-6"]);
+		assert.equal(requests[0].output_config?.effort, "low");
+		assert.equal(requests[1].output_config?.effort, "medium", "applyFlagSettings no longer sets the effort of the same turn's next request");
+		assert.equal(requests[2].output_config?.effort, "high", "effortLevel null no longer restores the model's default effort (Opus 4.6: high)");
+		assert.equal(requests[1].thinking?.type, requests[0].thinking?.type,
+			"setMaxThinkingTokens(0) now changes thinking mid-turn: src/index.ts could switch models whose thinking differs instead of refusing");
+	} finally {
+		close();
+		for (const release of parks) release();
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
 test("CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1 stops CC resuming a turn that ends at a tool result", { timeout: 120_000 }, async () => {
 	// A rebuild after a terminating tool, or after a parked query was discarded, ends
 	// at a tool result, which CC reads as an interrupted turn. Behind a server flag it
