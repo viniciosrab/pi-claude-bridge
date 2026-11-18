@@ -2049,6 +2049,9 @@ async function changeRunningEffort(c: QueryContext, model: Model<any>, effort: E
 		// A query that ended or was replaced meanwhile serves nothing more; one already
 		// at this effort (the change before set it) needs nothing.
 		if (c.activeQuery !== q || c.servedEffort === effort) return;
+		// The effort was computed for `model`: a switch to it refused meanwhile leaves the
+		// query on another model, which keeps its own effort until the next prompt.
+		if (c.servedModel && claudeCodeModelId(c.servedModel, longContextSettings) !== cliModel) return;
 		if (c.refusedEfforts.has(`${cliModel}:${effort ?? "default"}`)) return;
 		const from = c.servedEffort;
 		await applyRunningEffort(c, q, cliModel, effort);

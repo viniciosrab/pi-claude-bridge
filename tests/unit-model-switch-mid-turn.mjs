@@ -449,6 +449,31 @@ it("sets a changed effort once: the next tool result at the same level applies n
 	assert.equal(started.length, 1);
 });
 
+it("does not set the effort computed for a model whose pending switch is then refused", async () => {
+	// Haiku 5.5 to Opus 5.5 at "high" (same thinking settings); the switch outlasts the
+	// wait and is refused, and pi asks Opus at "medium" at the next tool result.
+	mod.__test.setSwitchModelWaitMs(20);
+	setModelDelayMs = 300;
+	setModelFails = true;
+	secondTool = true;
+	const [haiku, opus] = [byId("claude-haiku-5-5"), byId("claude-opus-5-5")];
+	const opts = (reasoning) => ({ sessionId: "pi-refused-then-effort", reasoning, signal: new AbortController().signal });
+	const ask = user("read a");
+	const parked = await streamSimple(haiku, { messages: [ask], tools }, opts("high")).result();
+	const toOpus = streamSimple(opus, { messages: [ask, parked, toolResult], tools }, opts("high"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parked2 = await toOpus.result();
+	const medium = streamSimple(opus, { messages: [ask, parked, toolResult, parked2, secondResult], tools }, opts("medium"));
+	assert.equal(setModels.length, 0, "the switch to Opus is still pending at the second tool result");
+	await new Promise((r) => setTimeout(r, 400)); // the switch is refused, the chained effort change settles
+	release2();
+	const continued = await medium.result();
+	assert.equal(setModels.length, 1, "the switch was attempted once");
+	assert.deepEqual(flagSettings, [], "no effort was set on the query still serving Haiku");
+	assert.equal(continued.model, haiku.id, "labeled with the model that served it");
+});
+
 it("does not try a refused effort again at the next tool result; the next prompt starts with it", async () => {
 	flagFails = true;
 	secondTool = true;
