@@ -847,7 +847,8 @@ test("CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1 stops CC resuming a turn 
 				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", ...extraEnv },
 			}),
 		}));
-		const body = requests.filter((b) => JSON.stringify(b.messages).includes("PI-RESUME-NOTE")).at(-1);
+		// Our own turn, not a user hook's or CC's title request quoting the same prompt.
+		const body = turnRequest(requests, "PI-RESUME-NOTE");
 		assert.ok(body, "the resumed query never reached the stub API");
 		return JSON.stringify(body.messages);
 	};
@@ -898,7 +899,8 @@ test("MAX_AGE_MS=1 keeps the fork's abort-resume shapes resumable and free of CC
 				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1", CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", ...extraEnv },
 			}),
 		}));
-		const body = requests.filter((b) => JSON.stringify(b.messages).includes("PI-NEXT-PROMPT")).at(-1);
+		// Our own turn, not a user hook's or CC's title request quoting the same prompt.
+		const body = turnRequest(requests, "PI-NEXT-PROMPT");
 		assert.ok(body, "the resumed query never reached the stub API");
 		return JSON.stringify(body.messages);
 	};
