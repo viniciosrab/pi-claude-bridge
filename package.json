@@ -46,8 +46,8 @@
     "change-case": "^5.4.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.86.1",
-    "@earendil-works/pi-coding-agent": ">=0.86.1",
+    "@earendil-works/pi-ai": ">=1.5.1",
+    "@earendil-works/pi-coding-agent": ">=1.5.1",
     "typebox": "*"
   },
   "devDependencies": {

@@ -20,7 +20,7 @@ pi install git:github.com/viniciosrab/pi-claude-bridge
 
 This follows the default branch, and `pi update --extensions` pulls the latest commit. To stay on a release instead, pin its tag, e.g. `pi install git:github.com/viniciosrab/pi-claude-bridge@v1.0.0`.
 
-Requires pi 0.86.1 or newer and a Claude Code login: install [Claude Code](https://code.claude.com/docs/en/quickstart), run `claude` and sign in with your Claude subscription when it asks (`/login` signs in again later). The bridge uses that login, so there is no API key to set.
+Requires pi 1.5.1 or newer and a Claude Code login: install [Claude Code](https://code.claude.com/docs/en/quickstart), run `claude` and sign in with your Claude subscription when it asks (`/login` signs in again later). The bridge uses that login, so there is no API key to set.
 
 ## Use
 
@@ -65,7 +65,7 @@ Plan access is separate: on Pro, Fable 5 needs Extra Usage (5.1 is assumed the s
 ## Troubleshooting
 
 - **Every turn fails with an auth error.** Unset any `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` you export: they redirect Claude Code away from your subscription.
-- **A turn is refused because of the system prompt.** Usually another extension changed or replaced pi's system prompt: fix or disable it. If the error points at your own text, reword it.
+- **A turn is refused because of the system prompt.** Usually another extension changed or replaced pi's system prompt, so the bridge cannot match it: fix or disable it.
 - **Claude Code hooks add duplicate guidance.** `~/.claude/settings.json` hooks also fire in bridge turns. Have the hook skip them: `[ -n "$PI_CODING_AGENT" ] && exit 0`.
 - **Subagents with @gotgenes/pi-subagents.** Add `{"promptInheritance": {"claude-bridge": "portable"}}` to `~/.pi/agent/subagents.json`. nicobailon/pi-subagents needs no setup.
 

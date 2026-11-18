@@ -92,9 +92,9 @@ Hooks do not fire on isolated summary queries.
 
 pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks.
 
-### System prompt rejections
+### pi's harness in the system prompt
 
-Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (`docs/custom-provider.md` in the same prompt with `docs/packages.md`), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; `CLAUDE_BRIDGE_DEBUG=1` writes the full prompt to the bridge log when this happens.
+The bridge forwards prompt text that carries pi's own system prompt wording or the two documentation paths `docs/custom-provider.md` and `docs/packages.md`, for example a subagent that embeds its parent's whole prompt. Up to pi 1.4, Anthropic billed a request carrying pi's harness as Extra Usage (or failed it with a 400 "out of extra usage") and the bridge refused such turns; the wording pi renders since 1.5.1 is served on the plan, so the refusal is gone and the bridge requires pi 1.5.1 or newer. The measurements are upstream's (elidickinson/pi-claude-bridge `diag/EXTRA-USAGE-400.md` and `diag/third-party-gate/`).
 
 ### Plan usage for footers and quota extensions
 
