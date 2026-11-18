@@ -1995,6 +1995,8 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, effort: Ef
 			await q.setModel(cliModel);
 		} catch (error) {
 			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${c.servedModel?.id ?? "?"} until the next prompt:`, error);
+			// Not tried again in this query: each try is a validation request that holds a result back.
+			if (c.activeQuery === q) c.refusedModel = cliModel;
 			return;
 		} finally {
 			// CC settles switches in the order they were sent: only the latest clears the mark.
@@ -2340,6 +2342,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			debug(`provider: ${model.id} requested at a tool result needs other thinking settings, query continues on ${served.id} until the next prompt`);
 			switchTo = null;
 		}
+		if (switchTo && claudeCodeModelId(switchTo, longContextSettings) === resultCtx.refusedModel) {
+			debug(`provider: ${model.id} requested at a tool result was refused earlier in this query, query continues on ${served.id} until the next prompt`);
+			switchTo = null;
+		}
 		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
@@ -2437,6 +2443,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// The Extra Usage warning is once per query: a fresh query on a reused
 	// top-level context warns again (tool-result continuations share it).
 	queryCtx.warnedUnplannedOverage = false;
+	// A refused switch is per query: the next one starts on the requested model anyway.
+	queryCtx.refusedModel = null;
 	// Per query: a continuation's fallback waits for this query's first sign of work.
 	queryCtx.sawTurnWork = false;
 	queryCtx.pendingToolCalls.clear();

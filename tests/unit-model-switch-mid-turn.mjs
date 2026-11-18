@@ -225,6 +225,35 @@ async function slowSwitchThenSecondTool(sid) {
 }
 const secondResult = { role: "toolResult", toolCallId: "toolu_2", toolName: "read", content: [{ type: "text", text: "MARKER_2" }], isError: false, timestamp: clock++ };
 
+it("does not try a refused switch again at the next tool result of the same query; the next prompt switches", async () => {
+	setModelFails = true;
+	secondTool = true;
+	const ask = user("read a");
+	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: "pi-refused-twice", signal: new AbortController().signal }).result();
+	const continuation = streamSimple(second, { messages: [ask, parked, toolResult], tools }, { sessionId: "pi-refused-twice", signal: new AbortController().signal });
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parkedAgain = await continuation.result();
+	assert.equal(parkedAgain.stopReason, "toolUse", "the query went on to a second tool call");
+	assert.equal(setModels.length, 1, "the switch was attempted at the first tool result");
+
+	const last = streamSimple(second, { messages: [ask, parked, toolResult, parkedAgain, secondResult], tools }, { sessionId: "pi-refused-twice", signal: new AbortController().signal });
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
+	release2();
+	const continued = await last.result();
+	assert.equal(setModels.length, 1, "the refused switch was not tried again");
+	assert.equal(started.length, 1, "the result still went to the running query");
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued", "the turn still continued");
+	assert.equal(continued.model, first.id, "labeled with the model that served it");
+	assert.equal(continued.provider, first.provider);
+
+	const next = await streamSimple(second, { messages: [ask, parked, toolResult, parkedAgain, secondResult, continued, user("again")], tools },
+		{ sessionId: "pi-refused-twice", signal: new AbortController().signal }).result();
+	assert.equal(started.length, 2, "the next prompt opened a fresh query");
+	assert.match(started[1], escape(second.id), "on the requested model");
+	assert.equal(next.model, second.id);
+});
+
 it("a switch landing while the query is parked on a later tool call does not relabel the message pi recorded", async () => {
 	const { parkedAgain } = await slowSwitchThenSecondTool("pi-late-label");
 	assert.deepEqual(setModels, [], "the response streamed before the switch landed");
