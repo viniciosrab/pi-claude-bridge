@@ -92,7 +92,7 @@ export function loadConfig(): Config {
 	// Reported and dropped rather than thrown: the extension always starts, and an unknown
 	// value keeps the default, the preset on.
 	if (preset !== undefined && preset !== null && typeof preset !== "boolean" && preset !== "claude_code") {
-		warnOnce(`claude-bridge: ignoring provider.systemPromptPreset ${JSON.stringify(preset)} in ${globalConfigPath()}: use true (default) or false`);
+		warnOnce(`claude-bridge: ignoring provider.systemPromptPreset ${JSON.stringify(preset)} in ${globalConfigPath()}: use true (default, or "claude_code") or false (or null)`);
 		delete provider.systemPromptPreset;
 	}
 	return { provider };
