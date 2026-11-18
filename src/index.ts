@@ -2737,9 +2737,8 @@ export default function (pi: ExtensionAPI) {
 	// agent_start (verified: before_agent_start=10,988 chars vs agent_start/query=23,479).
 	// A subagent embeds the widened parent prompt verbatim (pi-subagents reads
 	// ctx.getSystemPrompt() at dispatch), so unless the widened prompt is a capture key
-	// too, the child's turn resolves against nothing, falls to a verbatim side request,
-	// and ships pi's harness — tripping the server's third-party plan-eligibility check
-	// ("out of extra usage"). Recording it here, before the query, restores the match.
+	// too, the child's turn resolves against nothing and fails. Recording it here,
+	// before the query, restores the match.
 	//
 	// agent_start also captures a handler-returned forceSystemPrompt, which
 	// buildSystemPrompt renders verbatim.
