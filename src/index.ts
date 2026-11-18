@@ -1984,15 +1984,22 @@ let switchModelWaitMs = SWITCH_MODEL_WAIT_MS;
  *  Never rejects: a refused switch leaves the query on the model serving it. A switch
  *  that outlasts the wait lets the results go; if it lands later, the model it set
  *  serves from then on and labels the turn. */
-async function switchRunningModel(c: QueryContext, model: Model<any>, waitMs = switchModelWaitMs): Promise<void> {
+async function switchRunningModel(c: QueryContext, model: Model<any>, effort: EffortLevel | undefined, waitMs = switchModelWaitMs): Promise<void> {
 	const served = c.servedModel;
 	const cliModel = claudeCodeModelId(model, longContextSettings);
-	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void> } | null;
+	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void>; applyFlagSettings?: (s: { effortLevel: EffortLevel | null }) => Promise<void> } | null;
 	c.switchingTo = model;
 	const switched = (async () => {
 		try {
 			if (!q?.setModel) throw new Error("the query cannot switch models");
 			await q.setModel(cliModel);
+			// The effort the bridge computes for the new model, or its default (null): the
+			// query keeps the old model's otherwise. Applies to the same turn's next request.
+			try {
+				await q.applyFlagSettings?.({ effortLevel: effort ?? null });
+			} catch (error) {
+				debug(`provider: effort for ${cliModel} not applied after the switch:`, error);
+			}
 		} catch (error) {
 			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${c.servedModel?.id ?? "?"} until the next prompt:`, error);
 			return;
@@ -2324,7 +2331,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// prompt opens a fresh query on the requested model.
 		const served = resultCtx.servedModel ?? model;
 		const bound = resultCtx.switchingTo ?? served; // a switch still in flight is what CC will serve
-		const switchTo = claudeCodeModelId(bound, longContextSettings) !== claudeCodeModelId(model, longContextSettings) ? model : null;
+		let switchTo = claudeCodeModelId(bound, longContextSettings) !== claudeCodeModelId(model, longContextSettings) ? model : null;
+		// The new model needs other thinking settings (thinking off: one model can disable it,
+		// the other cannot), and a running query keeps the thinking it started with (pinned in
+		// tests/int-cc-contracts.mjs): the switch waits for the next prompt's fresh query.
+		if (switchTo && JSON.stringify(thinkingForReasoning(switchTo, options?.reasoning) ?? null) !== resultCtx.startThinking) {
+			debug(`provider: ${model.id} requested at a tool result needs other thinking settings, query continues on ${served.id} until the next prompt`);
+			switchTo = null;
+		}
 		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
@@ -2341,7 +2355,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// still returns its stream synchronously.
 		const deliverTo = resultCtx;
 		const parkedQuery = resultCtx.activeQuery;
-		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo) : Promise.resolve();
+		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo, effortForReasoning(switchTo, options?.reasoning)) : Promise.resolve();
 		void delivering.then(() => {
 			// The query may have ended while the switch was pending (an abort closes it);
 			// its results must not reach a query that took over this context since.
@@ -2538,6 +2552,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	const effort = effortForReasoning(model, options?.reasoning);
 	const thinking = thinkingForReasoning(model, options?.reasoning);
+	queryCtx.startThinking = JSON.stringify(thinking ?? null);
 
 	const extraArgs: Record<string, string | null> = { model: cliModel, "replay-user-messages": null };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
