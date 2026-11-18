@@ -35,9 +35,12 @@ await startAndWait();
 try {
 	const collector = collectText();
 	await send({ type: "prompt", message: "Use the sentinel-skill skill and follow its instructions exactly." }, TIMEOUT);
+	// pi's read tool on the fixture itself: a bash `cat` or a search that also names
+	// SKILL.md would print the marker without proving read works under its bridged name.
 	await waitForMatch(
-		(msg) => msg.type === "tool_execution_start" && JSON.stringify(msg).includes("SKILL.md"),
-		"read of SKILL.md",
+		(msg) => msg.type === "tool_execution_start" && msg.toolName === "read"
+			&& String(msg.args?.path ?? "").replace(/\\/g, "/").endsWith(".pi/skills/sentinel-skill/SKILL.md"),
+		"read of the fixture's SKILL.md",
 		TIMEOUT,
 	);
 	await waitForEvent("agent_end", TIMEOUT);
