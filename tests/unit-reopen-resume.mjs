@@ -208,6 +208,48 @@ describe("a pi session continued in a new process", () => {
 		assert.match(readFileSync(sessionFile(rebuilt), "utf8"), /written by claude code/);
 	});
 
+	it("a reentrant query of the same session with another prompt leaves the parent's session and prompt record alone", async () => {
+		// An extension's one-shot or a foreground subagent running inside the parent's
+		// turn on the parent's own pi session, under its own (wrapped) system prompt.
+		// Its prompt is not the parent's: it must neither rebuild the parent's CC
+		// session nor rewrite the prompt the parent's mirror records.
+		const P = "pi-reentrant-prompt";
+		// pi folds the tools into the system message (toBridgeContext reads them back).
+		const sysA = { role: "system", content: "the parent's prompt", toolsAdded: tools, timestamp: clock++ };
+		const sysB = { role: "system", content: "a one-shot's wrapped prompt", toolsAdded: tools, timestamp: clock++ };
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("read a"), u3 = user("next");
+		const mirror = () => JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${P}.json`), "utf8"));
+
+		scripts.push({ label: "P turn 1", steps: [init("cc-RP"), result("first answer")] });
+		await call(P, [sysA, u1]).result();
+		const digest = getSharedSession(P).promptDigest;
+		assert.ok(digest);
+
+		const gP = gate();
+		scripts.push({ label: "P turn 2", steps: [init("cc-RP"), ...toolUse("toolu_RP"), gP.wait, result("second answer")] });
+		const parked = await call(P, [sysA, u1, a1, u2]).result();
+		assert.equal(parked.stopReason, "toolUse");
+
+		scripts.push({ label: "reentrant one-shot", steps: [init("cc-oneshot"), result("one-shot answer")] });
+		await call(P, [sysB, user("one-shot task")]).result();
+		assert.equal(calls.at(-1).resume, undefined, "the one-shot starts clean");
+		assert.equal(getSharedSession(P).sessionId, "cc-RP");
+		assert.equal(getSharedSession(P).promptDigest, digest, "the parent's prompt record is untouched");
+		assert.ok(!getSharedSession(P).needsRebuild, "the parent's session is not marked for a rebuild");
+
+		const tr = toolResult("toolu_RP");
+		const continued = call(P, [sysA, u1, a1, u2, parked, tr]);
+		await settle();
+		gP.open();
+		await continued.result();
+		assert.equal(mirror().promptDigest, digest, "the mirror records the parent's prompt");
+
+		scripts.push({ label: "P turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [sysA, u1, a1, u2, parked, tr, say("second answer"), u3]).result();
+		assert.equal(calls.at(-1).resume, "cc-RP", "the parent resumes its own session");
+		assert.equal(existsSync(sessionFile("cc-RP")), false, "resumed, not rebuilt from pi's history");
+	});
+
 	it("rebuilds when Claude Code's session file is gone", async () => {
 		const P = "pi-reopen-no-file";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");

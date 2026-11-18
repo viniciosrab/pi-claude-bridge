@@ -801,8 +801,11 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// CC re-sends the prompt a session was made with on every resume, plain, after an
 	// abort or cut back after an error: a different prompt rebuilds from pi's history,
 	// like a rewrite. A rebuild after an abort or error result still rotates (forceRotate).
-	// Without a digest (a direct caller) the prompt is not compared.
-	if (promptDigest !== undefined && sharedSession && !sharedSession.needsRebuild && sharedSession.promptDigest !== promptDigest) {
+	// Without a digest (a direct caller) the prompt is not compared. Nor for a query
+	// reentrant on the session (an extension's one-shot or a foreground subagent inside
+	// the owner's turn, under its own prompt): its prompt is not the session's, and
+	// comparing it would rebuild the owner's session and drop its mirror.
+	if (promptDigest !== undefined && !isReentrant && sharedSession && !sharedSession.needsRebuild && sharedSession.promptDigest !== promptDigest) {
 		debug(`sync: system prompt changed (${sharedSession.promptDigest?.slice(0, 8) ?? "unknown"} -> ${promptDigest.slice(0, 8)}), rebuilding session ${sharedSession.sessionId.slice(0, 8)} from pi's history`);
 		sharedSession.needsRebuild = true;
 		if (piSessionId) dropMirror(piSessionId);
@@ -2277,7 +2280,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// from the set, not from here) and re-discard a healthy query.
 	queryCtx.historyStale = false;
 	queryCtx.missedSteer = false;
-	queryCtx.promptDigest = promptDigest;
 
 	const cwd = sessionCwdFor(options?.sessionId);
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
@@ -2298,6 +2300,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
 	const { sessionId: resumeSessionId } = syncResult;
+	// The prompt the session this query runs on records: CC keeps the one it was made
+	// with. A resumed session's is its state's (the owner resumes only on a match; a
+	// reentrant query must not overwrite the owner's); a fresh or rebuilt one records
+	// this query's. Completion and an abort write it back.
+	queryCtx.promptDigest = resumeSessionId ? sessionStateFor(piSessionId)?.promptDigest : promptDigest;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
 

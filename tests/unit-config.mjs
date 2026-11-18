@@ -81,6 +81,11 @@ describe("loadConfig", () => {
 			assert.deepEqual(loadConfig(), { provider: {} });
 			assert.deepEqual(loadConfig(), { provider: {} }, "still dropped on the second load");
 			assert.equal(errors.filter((e) => e.includes("systemPromptPreset")).length, 1, "one warning for two loads");
+			writeFileSync(join(getAgentDir(), "claude-bridge.json"), JSON.stringify({ provider: { systemPromptPreset: "another-value" } }));
+			loadConfig();
+			loadConfig();
+			assert.equal(errors.filter((e) => e.includes("systemPromptPreset")).length, 2, "a different invalid value is reported again, once");
+			assert.match(errors.at(-1), /another-value/);
 		} finally {
 			console.error = originalError;
 		}
