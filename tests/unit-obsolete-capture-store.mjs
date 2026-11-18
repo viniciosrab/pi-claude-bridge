@@ -44,7 +44,9 @@ describe("the obsolete prompt-capture store", () => {
 
 	it("a removal that fails is ignored", () => withAgentDir((agentDir) => {
 		let target;
-		assert.doesNotThrow(() => removeObsoleteCaptureStore((path) => { target = path; throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }));
+		let left;
+		assert.doesNotThrow(() => { left = removeObsoleteCaptureStore((path) => { target = path; throw Object.assign(new Error("EACCES"), { code: "EACCES" }); }); });
+		assert.match(left, /could not remove .*claude-bridge-captures: EACCES/);
 		assert.equal(target, join(agentDir, "claude-bridge-captures"));
 	}));
 });

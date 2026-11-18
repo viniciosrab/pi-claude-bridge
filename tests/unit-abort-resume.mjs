@@ -178,6 +178,22 @@ describe("the turn after an abort", () => {
 		assert.ok(!state.forceRotate, "nor is a later rebuild forced to rotate");
 	});
 
+	it("rebuilds on a fresh session id when pi's system prompt changed since the aborted turn", async () => {
+		// CC re-sends the prompt a session was created with on every resume
+		// (tests/int-cc-contracts.mjs): a changed prompt needs pi's history imported.
+		const P = "pi-abort-prompt";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("long essay"), a2 = aborted([{ type: "text", text: "partial" }]), u3 = user("next");
+		await completeThenAbort(P, [u1, a1, u2]);
+		pastSettleWindow(P);
+
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [{ role: "system", content: "a new rule", timestamp: clock++ }, u1, a1, u2, a2, u3]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.ok(resumed && resumed !== `cc-${P}`, "rebuilt on a rotated id: the killed CLI may still write the old file");
+		assert.match(readFileSync(sessionFile(resumed), "utf8"), /first answer/, "the rotated session is rebuilt from pi's history");
+	});
+
 	it("resumes when the aborted turn ended inside a tool call", async () => {
 		const P = "pi-abort-tool";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("read a"), a2 = toolCall("toolu_1"), tr = toolResult("toolu_1"), u3 = user("next");

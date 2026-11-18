@@ -26,14 +26,14 @@ Requires pi 1.5.1 or newer and a Claude Code login: install [Claude Code](https:
 
 Pick a model with `/model`, e.g. `claude-bridge/claude-opus-5-5` or `claude-bridge/claude-haiku-5-5`. New Claude models appear on their own after `pi update`.
 
-Skills, AGENTS.md/CLAUDE.md and steering work as usual. Claude gets pi's whole system prompt as pi renders it, after Claude Code's own; Claude Code's `~/.claude/CLAUDE.md`, `.claude/rules/` and output style do not apply.
+Skills, AGENTS.md/CLAUDE.md and steering work as usual. Claude gets pi's whole system prompt as pi renders it, appended to Claude Code's own, or alone with `systemPromptPreset: false`; Claude Code's `~/.claude/CLAUDE.md`, `.claude/rules/` and output style do not apply.
 
 ## What to expect
 
 - **Usage counts against your Claude plan**, the same as Claude Code.
 - **pi runs the tools, not Claude Code.** Claude Code's own tools are not used, nor, by default, the MCP servers from `~/.claude.json` and `.mcp.json` (see `strictMcpConfig`); claude.ai's cloud MCP servers are always off. Claude sees pi's tools, skills and extensions.
 - **`/compact`, tree navigation or an extension that edits past messages makes the next turn cost more.** pi's history no longer matches Claude Code's session, so the bridge rebuilds it and the next request misses the prompt cache.
-- **A change to pi's system prompt reaches Claude at the next prompt** and costs a prompt-cache miss on that request.
+- **A change to pi's system prompt rebuilds the session at the next prompt.** Claude Code keeps the prompt a session was created with, so when pi's system prompt or `systemPromptPreset` changes, the bridge rebuilds Claude Code's session from pi's history and that request re-caches the whole conversation once.
 
 ## Configure
 
