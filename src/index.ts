@@ -1980,6 +1980,90 @@ function steerMissedSession(c: QueryContext, text: string): void {
 const SWITCH_MODEL_WAIT_MS = 15_000;
 let switchModelWaitMs = SWITCH_MODEL_WAIT_MS;
 
+type SettingsQuery = { setModel?: (m?: string) => Promise<void>; applyFlagSettings?: (s: { effortLevel: EffortLevel | null }) => Promise<void> } | null;
+
+/** Sets `effort` (null: the model's default) on query `q`, serving `cliModel`, for the
+ *  turn's next request (pinned in tests/int-cc-contracts.mjs). Never rejects: a refused
+ *  effort is not tried again in this query, and the next prompt's fresh query starts
+ *  with it anyway. */
+async function applyRunningEffort(c: QueryContext, q: SettingsQuery, cliModel: string, effort: EffortLevel | null): Promise<void> {
+	if (c.refusedEfforts.has(`${cliModel}:${effort ?? "default"}`)) {
+		debug(`provider: effort ${effort ?? "default"} for ${cliModel} was refused earlier in this query, query keeps ${c.servedEffort ?? "default"} until the next prompt`);
+		return;
+	}
+	try {
+		if (!q?.applyFlagSettings) throw new Error("the query cannot set its effort");
+		await q.applyFlagSettings({ effortLevel: effort });
+	} catch (error) {
+		debug(`provider: effort ${effort ?? "default"} for ${cliModel} not applied, query keeps ${c.servedEffort ?? "default"} until the next prompt:`, error);
+		if (c.activeQuery === q) c.refusedEfforts.add(`${cliModel}:${effort ?? "default"}`);
+		return;
+	}
+	if (c.activeQuery === q) c.servedEffort = effort;
+}
+
+/** Tracks `change` as the query's latest settings change, setting `effort` once it lands. */
+function trackSettingsChange(c: QueryContext, change: Promise<void>, effort: EffortLevel | null): void {
+	c.settingsChange = change;
+	c.pendingEffort = effort;
+	void change.then(() => {
+		if (c.settingsChange !== change) return;
+		c.settingsChange = null;
+		c.pendingEffort = undefined;
+	});
+}
+
+/** Waits for `change`, at most `waitMs`: tool results held back on it hold the turn. */
+async function waitForSettingsChange(change: Promise<void>, waitMs: number, what: string): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });
+	if (await Promise.race([change, waited]) === "timeout") {
+		debug(`provider: ${what} still pending after ${waitMs} ms, delivering the tool results`);
+	}
+	clearTimeout(timer);
+}
+
+/** The effort a query parked at a tool boundary would get from pi's reasoning level
+ *  there, when it changes nothing else: undefined when nothing is to be set mid-turn. */
+function effortChangeAt(c: QueryContext, model: Model<any>, reasoning: string | undefined): EffortLevel | null | undefined {
+	const effort = effortForReasoning(model, reasoning) ?? null;
+	const expected = c.pendingEffort !== undefined ? c.pendingEffort : c.servedEffort;
+	if (effort === expected) return undefined;
+	// Thinking on or off cannot follow a running query (pinned in tests/int-cc-contracts.mjs).
+	if (JSON.stringify(thinkingForReasoning(model, reasoning) ?? null) !== c.startThinking) {
+		debug(`provider: thinking level ${reasoning ?? "off"} requested at a tool result needs other thinking settings, query keeps effort ${expected ?? "default"} until the next prompt`);
+		return undefined;
+	}
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	if (c.refusedEfforts.has(`${cliModel}:${effort ?? "default"}`)) {
+		debug(`provider: effort ${effort ?? "default"} requested at a tool result was refused earlier in this query, query keeps ${expected ?? "default"} until the next prompt`);
+		return undefined;
+	}
+	return effort;
+}
+
+/** Sets the effort of a query parked at a tool boundary before its results go in,
+ *  after any settings change still in flight. Never rejects; bounded like a switch. */
+async function changeRunningEffort(c: QueryContext, model: Model<any>, effort: EffortLevel | null, waitMs = switchModelWaitMs): Promise<void> {
+	const q = c.activeQuery as SettingsQuery;
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	const before = c.settingsChange;
+	const changed = (async () => {
+		if (before) await before; // never rejects
+		// A query that ended or was replaced meanwhile serves nothing more; one already
+		// at this effort (the change before set it) needs nothing.
+		if (c.activeQuery !== q || c.servedEffort === effort) return;
+		// The effort was computed for `model`: a switch to it refused meanwhile leaves the
+		// query on another model, which keeps its own effort until the next prompt.
+		if (c.servedModel && claudeCodeModelId(c.servedModel, longContextSettings) !== cliModel) return;
+		const from = c.servedEffort;
+		await applyRunningEffort(c, q, cliModel, effort);
+		if (c.servedEffort === effort) debug(`provider: set the running query's effort from ${from ?? "default"} to ${effort ?? "default"} at a tool result`);
+	})();
+	trackSettingsChange(c, changed, effort);
+	await waitForSettingsChange(changed, waitMs, `effort ${effort ?? "default"} for ${cliModel}`);
+}
+
 /** Switch a query parked at a tool boundary to `model` before its results go in.
  *  Never rejects: a refused switch leaves the query on the model serving it. A switch
  *  that outlasts the wait lets the results go; if it lands later, the model it set
@@ -1987,7 +2071,7 @@ let switchModelWaitMs = SWITCH_MODEL_WAIT_MS;
 async function switchRunningModel(c: QueryContext, model: Model<any>, effort: EffortLevel | undefined, waitMs = switchModelWaitMs): Promise<void> {
 	const served = c.servedModel;
 	const cliModel = claudeCodeModelId(model, longContextSettings);
-	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void>; applyFlagSettings?: (s: { effortLevel: EffortLevel | null }) => Promise<void> } | null;
+	const q = c.activeQuery as SettingsQuery;
 	c.switchingTo = model;
 	const switched = (async () => {
 		try {
@@ -2014,18 +2098,10 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, effort: Ef
 		// Then the effort the bridge computes for the new model, or its default (null):
 		// the query keeps the old model's otherwise. Applies to the turn's next request.
 		// After the label, which follows the model whether or not this lands in the wait.
-		try {
-			await q!.applyFlagSettings?.({ effortLevel: effort ?? null });
-		} catch (error) {
-			debug(`provider: effort for ${cliModel} not applied after the switch:`, error);
-		}
+		await applyRunningEffort(c, q, cliModel, effort ?? null);
 	})();
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });
-	if (await Promise.race([switched, waited]) === "timeout") {
-		debug(`provider: switch to ${cliModel} still pending after ${waitMs} ms, delivering the tool results`);
-	}
-	clearTimeout(timer);
+	trackSettingsChange(c, switched, effort ?? null);
+	await waitForSettingsChange(switched, waitMs, `switch to ${cliModel}`);
 }
 
 async function deliverToolResults(
@@ -2382,7 +2458,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// still returns its stream synchronously.
 		const deliverTo = resultCtx;
 		const parkedQuery = resultCtx.activeQuery;
-		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo, effortForReasoning(switchTo, options?.reasoning)) : Promise.resolve();
+		// pi changed only the thinking level (a new effort on the same model): set it for
+		// the turn's next request too, as a switch does with the new model's effort.
+		const effortTo = !switchTo && claudeCodeModelId(bound, longContextSettings) === claudeCodeModelId(model, longContextSettings)
+			? effortChangeAt(resultCtx, model, options?.reasoning)
+			: undefined;
+		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo, effortForReasoning(switchTo, options?.reasoning))
+			: effortTo !== undefined ? changeRunningEffort(deliverTo, model, effortTo)
+			: Promise.resolve();
 		void delivering.then(() => {
 			// The query may have ended while the switch was pending (an abort closes it);
 			// its results must not reach a query that took over this context since.
@@ -2465,6 +2548,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.warnedUnplannedOverage = false;
 	// A refused switch is per query: the next one starts on the requested model anyway.
 	queryCtx.refusedModels.clear();
+	queryCtx.refusedEfforts.clear();
+	queryCtx.settingsChange = null;
+	queryCtx.pendingEffort = undefined;
 	// Per query: a continuation's fallback waits for this query's first sign of work.
 	queryCtx.sawTurnWork = false;
 	queryCtx.pendingToolCalls.clear();
@@ -2582,6 +2668,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const effort = effortForReasoning(model, options?.reasoning);
 	const thinking = thinkingForReasoning(model, options?.reasoning);
 	queryCtx.startThinking = JSON.stringify(thinking ?? null);
+	queryCtx.servedEffort = effort ?? null;
 
 	const extraArgs: Record<string, string | null> = { model: cliModel, "replay-user-messages": null };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;

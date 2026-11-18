@@ -6,6 +6,7 @@
 //
 // Extracted from index.ts so tests can import without activating the extension.
 
+import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import type { AssistantMessage, AssistantMessageEventStream, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
 import type { PromptStream } from "./prompt-stream.js";
@@ -103,6 +104,17 @@ export class QueryContext {
 	 *  this query, so a turn of many tool calls makes one failed switch per model, not one
 	 *  per call. */
 	refusedModels = new Set<string>();
+	/** The effort this query serves: the one it started with, or the latest that
+	 *  applyFlagSettings set. Null is Claude Code's default for the model. */
+	servedEffort: EffortLevel | null = null;
+	/** The efforts this query refused to set, as `<CC model id>:<effort>`: none is tried
+	 *  again in this query, like refusedModels. */
+	refusedEfforts = new Set<string>();
+	/** The latest model switch or effort change sent to this query and not yet settled:
+	 *  an effort change waits for it, so it is decided against what CC will serve. */
+	settingsChange: Promise<void> | null = null;
+	/** The effort settingsChange sets once it lands (undefined when none is pending). */
+	pendingEffort: EffortLevel | null | undefined = undefined;
 	/** The thinking config this query was started with, serialized. Claude Code keeps
 	 *  it for the whole query: setMaxThinkingTokens does not reach a turn under way. */
 	startThinking = "null";
