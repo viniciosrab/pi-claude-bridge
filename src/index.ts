@@ -1995,6 +1995,8 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, effort: Ef
 			await q.setModel(cliModel);
 		} catch (error) {
 			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${c.servedModel?.id ?? "?"} until the next prompt:`, error);
+			// Not tried again in this query: each try is a validation request that holds a result back.
+			if (c.activeQuery === q) c.refusedModels.add(cliModel);
 			return;
 		} finally {
 			// CC settles switches in the order they were sent: only the latest clears the mark.
@@ -2313,6 +2315,26 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		activeQuery = ctx().activeQuery !== null;
 	}
 
+	// pi moved past a call this session's query is parked on: its result is in pi's
+	// history but was never delivered here (a `/model` to another provider while the
+	// tool ran sent it there, and the conversation went on there). Nothing will ever
+	// answer the waiting handler, and the watchdog keeps it alive because pi has the
+	// call, so every later prompt of the session would run nested in a dead turn.
+	// Discard it; the fresh query rebuilds from pi's history. Only calls whose
+	// handlers still wait, not turnToolCallIds: a query of the same session started
+	// from inside a tool carries the owner's earlier results in its history.
+	if (!resultCtx && options?.sessionId) {
+		const answered = new Set(context.messages.flatMap((m) => (m.role === "toolResult" ? [m.toolCallId] : [])));
+		for (const c of [...activeQueryContexts]) {
+			if (c.piSessionId !== options.sessionId || !c.activeQuery || c.aborting) continue;
+			const movedPast = [...c.pendingToolCalls.keys()].find((id) => answered.has(id));
+			if (!movedPast) continue;
+			debug(`provider: pi continued past tool call [${movedPast}] without delivering its result here, discarding its parked query`);
+			discardQuery(c, "pi continued the conversation without this tool result; this query was discarded.");
+			activeQuery = ctx().activeQuery !== null;
+		}
+	}
+
 	const isReentrantUserQuery = activeQuery && lastMsgRole === "user" && allResults.length === 0;
 	if (isReentrantUserQuery) {
 		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${context.messages.length}`);
@@ -2338,6 +2360,10 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// tests/int-cc-contracts.mjs): the switch waits for the next prompt's fresh query.
 		if (switchTo && JSON.stringify(thinkingForReasoning(switchTo, options?.reasoning) ?? null) !== resultCtx.startThinking) {
 			debug(`provider: ${model.id} requested at a tool result needs other thinking settings, query continues on ${served.id} until the next prompt`);
+			switchTo = null;
+		}
+		if (switchTo && resultCtx.refusedModels.has(claudeCodeModelId(switchTo, longContextSettings))) {
+			debug(`provider: ${model.id} requested at a tool result was refused earlier in this query, query continues on ${served.id} until the next prompt`);
 			switchTo = null;
 		}
 		resultCtx.resetTurnState(served);
@@ -2437,6 +2463,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// The Extra Usage warning is once per query: a fresh query on a reused
 	// top-level context warns again (tool-result continuations share it).
 	queryCtx.warnedUnplannedOverage = false;
+	// A refused switch is per query: the next one starts on the requested model anyway.
+	queryCtx.refusedModels.clear();
 	// Per query: a continuation's fallback waits for this query's first sign of work.
 	queryCtx.sawTurnWork = false;
 	queryCtx.pendingToolCalls.clear();
