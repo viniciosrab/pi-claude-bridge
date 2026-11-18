@@ -21,12 +21,8 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { claudeCodeSettings, loadConfig, removedAskClaudeNotice, type Config } from "./config.js";
-import {
-	projectPromptCapture,
-	sharedPromptCaptures,
-	type PromptCapture,
-} from "./prompt-capture.js";
+import { claudeCodeSettings, loadConfig, removedAskClaudeNotice, systemPromptPresetEnabled, type Config } from "./config.js";
+import { sharedPromptCaptures } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
@@ -2107,13 +2103,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const forkStart = startFromParentFork(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), (s) => setSessionStateFor(options?.sessionId, { ...s, piSessionId: options?.sessionId }), debug, model, context, options); if (forkStart) return forkStart; // fork: fork cache
 	showRemovedAskClaudeNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
-	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
-	// prompt-capture lookup below assumes (issue #106).
+	// back out to the prompt/tools fields every cursor write and syncSharedSession call
+	// below assumes (issue #106).
 	context = toBridgeContext(context);
 
 	// Pi's compaction, branch-summary and bug-report calls use cacheRetention:"none"
-	// in completeSummarization. Their prompts bypass the capture boundaries, so route
-	// them to an isolated persistSession:false CC process without session sync.
+	// in completeSummarization. Their prompts are one-off, so route them to an isolated
+	// persistSession:false CC process without session sync.
 	if (options?.cacheRetention === "none") {
 		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
 		return isolatedStreamFn(model, context, options);
@@ -2238,45 +2234,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const queryCtx = isReentrant ? new QueryContext() : ctx();
 	debug(`provider: fresh query setup, isReentrant=${isReentrant}, activeContexts=${activeQueryContexts.size}`);
 
-	// Resolved first: an unaccountable system prompt fails this query before anything
-	// is claimed or reset, leaving no half-built query behind — in particular no stream
-	// claimed on the shared context that nobody will ever end.
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
-	// Build from what Pi loaded for this run, so `--no-context-files` and
-	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
-	// custom override embeds its parent's assembled Pi prompt; recursive projection
-	// replaces that exact inherited prompt with its already-safe portable parts.
-	// Derive the key from the transcript replay (toBridgeContext), NOT from the
-	// recorded keys: under a forced prompt the transcript head is projected via
-	// transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
-	let promptCapture: PromptCapture | undefined;
-	let systemPromptAppend: string | undefined;
-	try {
-		promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
-		systemPromptAppend = promptCapture
-			? projectPromptCapture(promptCapture, {
-				skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-			})
-			: undefined;
-	} catch (err) {
-		// resolveOrDerive and projectPromptCapture throw to stop a turn that would lose
-		// its instructions or leak pi's harness text. Report it on the stream, as pi-ai's
-		// provider contract expects, so any caller — not only pi's agent loop, which
-		// catches a throw — sees a failed turn rather than a synchronous exception.
-		const output = newAssistantOutput(model, "", "error", errorMessage(err));
-		queueMicrotask(() => {
-			stream.push({ type: "error", reason: "error", error: output });
-			markStreamComplete(stream);
-			stream.end();
-		});
-		diagDump("prompt_capture_unresolved", {
-			promptChars: context.systemPrompt?.length ?? 0,
-			knownKeys: promptCaptures.size,
-			reentrantUserQuery: isReentrantUserQuery,
-			error: errorMessage(err),
-		});
-		return stream;
-	}
+	// pi's own prompt, whole: toBridgeContext joined pi's sections through pi-ai, as pi
+	// renders them (tools, rules, docs, context files, skills, extensions' sections). No
+	// capture lookup: a prompt nothing recorded (a replaced prompt, a subagent's wrapper)
+	// is forwarded as it is.
+	const systemPromptText = context.systemPrompt || undefined;
+	const usePreset = systemPromptPresetEnabled(providerSettings);
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
@@ -2424,10 +2388,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			// layer outranks user/project/local settings.
 			outputStyle: "default",
 		},
-		systemPrompt: {
-			type: "preset", preset: "claude_code",
-			append: systemPromptAppend ? systemPromptAppend : undefined,
-		},
+		// Claude Code's preset first with pi's prompt as its append, or, with
+		// provider.systemPromptPreset false, pi's prompt alone.
+		systemPrompt: usePreset
+			? { type: "preset", preset: "claude_code", append: systemPromptText }
+			: systemPromptText,
 		extraArgs,
 		...(effort ? { effort } : {}),
 		...(thinking ? { thinking } : {}),
@@ -2442,7 +2407,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	debug("provider: fresh query",
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
-		`ctxFiles=${promptCapture?.contextFiles.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
+		`promptChars=${systemPromptText?.length ?? 0} preset=${usePreset} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
 	// 3. Start SDK query and claim it for this context

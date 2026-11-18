@@ -27,6 +27,10 @@ export interface Config {
 		// Model ids (e.g. "claude-future-9") whose declared 1M context Claude Code
 		// does not actually serve; pins them to the bare id at 200K.
 		forceTwoHundredK?: string[];
+		// Claude Code's own `claude_code` preset goes first, with pi's whole system
+		// prompt as its append. On by default; false sends pi's prompt alone as a plain
+		// string. Upstream's spellings are accepted too: "claude_code" means on, null off.
+		systemPromptPreset?: boolean | "claude_code" | null;
 	};
 }
 
@@ -63,7 +67,21 @@ export function removedAskClaudeNotice(): string | undefined {
 	return `AskClaude was removed from pi-claude-bridge; its settings are ignored. Select a claude-bridge model with /model to use Claude, and delete the "askClaude" section from ${path} to hide this notice.`;
 }
 
+/** Whether the provider path sends Claude Code's preset with pi's prompt as its append
+ *  (default) or pi's prompt alone as a plain string. */
+export function systemPromptPresetEnabled(provider: Config["provider"] = {}): boolean {
+	return provider.systemPromptPreset !== false && provider.systemPromptPreset !== null;
+}
+
 export function loadConfig(): Config {
 	const global = tryParseJson(globalConfigPath());
-	return { provider: { ...global.provider } };
+	const provider = { ...global.provider };
+	const preset: unknown = provider.systemPromptPreset;
+	// Reported and dropped rather than thrown: the extension always starts, and an unknown
+	// value keeps the default, the preset on.
+	if (preset !== undefined && preset !== null && typeof preset !== "boolean" && preset !== "claude_code") {
+		console.error(`claude-bridge: ignoring provider.systemPromptPreset ${JSON.stringify(preset)} in ${globalConfigPath()}: use true (default) or false`);
+		delete provider.systemPromptPreset;
+	}
+	return { provider };
 }
