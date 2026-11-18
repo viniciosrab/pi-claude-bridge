@@ -52,6 +52,7 @@ const started = [];
 const setModels = [];
 /** applyFlagSettings calls, with the setModel count at the time. */
 const flagSettings = [];
+let flagDelayMs = 0;
 let release;
 let release2;
 /** A query that makes a second tool call after the first result. */
@@ -68,6 +69,7 @@ beforeEach(() => {
 	started.length = 0;
 	setModels.length = 0;
 	flagSettings.length = 0;
+	flagDelayMs = 0;
 	setModelFails = false;
 	setModelDelayMs = 5;
 	secondTool = false;
@@ -106,7 +108,7 @@ beforeEach(() => {
 			resultsAtSwitch.push(ctx().pendingResults.size);
 			if (setModelFails) throw new Error("setModel refused");
 		};
-		gen.applyFlagSettings = async (settings) => { flagSettings.push({ settings, afterSetModels: setModels.length, resultsQueued: ctx().pendingResults.size }); };
+		gen.applyFlagSettings = async (settings) => { if (flagDelayMs) await new Promise((r) => setTimeout(r, flagDelayMs)); flagSettings.push({ settings, afterSetModels: setModels.length, resultsQueued: ctx().pendingResults.size }); };
 		gen.interrupt = async () => {};
 		gen.close = () => onClose();
 		return gen;
@@ -299,4 +301,14 @@ it("does not switch mid-turn when the new model needs other thinking settings; t
 	assert.equal(started.length, 2, "the next prompt opened a fresh query");
 	assert.match(started[1], escape(opus.id));
 	assert.equal(next.model, opus.id);
+});
+
+it("labels the continuation with the new model once setModel lands, even when the effort call outlasts the wait", async () => {
+	mod.__test.setSwitchModelWaitMs(30);
+	flagDelayMs = 150;
+	const { continued } = await switchWith("pi-slow-effort", byId("claude-fable-5-2"), byId("claude-fable-5-1"), "high");
+	assert.equal(setModels.length, 1, "the model switched before the results went in");
+	assert.equal(continued.model, "claude-fable-5-1", "the new model served the continuation");
+	await new Promise((r) => setTimeout(r, 200));
+	assert.deepEqual(flagSettings.map((f) => f.settings), [{ effortLevel: "high" }], "the effort still went through");
 });

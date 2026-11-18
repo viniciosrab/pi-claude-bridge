@@ -1993,13 +1993,6 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, effort: Ef
 		try {
 			if (!q?.setModel) throw new Error("the query cannot switch models");
 			await q.setModel(cliModel);
-			// The effort the bridge computes for the new model, or its default (null): the
-			// query keeps the old model's otherwise. Applies to the same turn's next request.
-			try {
-				await q.applyFlagSettings?.({ effortLevel: effort ?? null });
-			} catch (error) {
-				debug(`provider: effort for ${cliModel} not applied after the switch:`, error);
-			}
 		} catch (error) {
 			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${c.servedModel?.id ?? "?"} until the next prompt:`, error);
 			return;
@@ -2016,6 +2009,14 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, effort: Ef
 		// (the message pi recorded) was served by the model before the switch.
 		const responseStarted = c.turnStarted || c.turnSawStreamEvent || c.turnFallbackMessageId !== undefined;
 		if (c.currentPiStream && !responseStarted && c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+		// Then the effort the bridge computes for the new model, or its default (null):
+		// the query keeps the old model's otherwise. Applies to the turn's next request.
+		// After the label, which follows the model whether or not this lands in the wait.
+		try {
+			await q!.applyFlagSettings?.({ effortLevel: effort ?? null });
+		} catch (error) {
+			debug(`provider: effort for ${cliModel} not applied after the switch:`, error);
+		}
 	})();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });
