@@ -820,6 +820,90 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 
 // --- Resuming a session that ends at a tool result ---
 
+test("setModel while a tool call is parked makes the turn's next request use the new model (upstream #273)", { timeout: 120_000 }, async () => {
+	// pi can switch models between a tool call and its result (`/model` while a tool
+	// runs, or a router). The result goes to the query already running; src/index.ts
+	// calls Query.setModel before delivering it, which must change the model of the
+	// same turn's next API request, not only of later turns.
+	const requests = [];
+	const server = createServer((req, res) => {
+		const chunks = [];
+		req.on("data", (c) => chunks.push(c));
+		req.on("end", () => {
+			if (!(req.method === "POST" && req.url.startsWith("/v1/messages"))) { res.writeHead(404).end(); return; }
+			const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			// Only our turn serves the marker tool: CC's title requests and a user hook's
+			// model calls reach the stub too.
+			const ours = (body.tools ?? []).some((t) => t.name === "mcp__custom-tools__marker");
+			if (ours) requests.push({ ...body, beta: String(req.headers["anthropic-beta"] ?? "") });
+			if (!body.stream) {
+				// setModel validates the model with a plain request.
+				res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "msg_validate", type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "OK" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }));
+				return;
+			}
+			const event = (name, obj) => `event: ${name}\ndata: ${JSON.stringify(obj)}\n\n`;
+			const callTool = ours && !JSON.stringify(body.messages).includes("tool_result");
+			const block = callTool
+				? [event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_switch_1", name: "mcp__custom-tools__marker", input: {} } }),
+					event("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } })]
+				: [event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+					event("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "OK" } })];
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.end(event("message_start", { type: "message_start", message: { id: `msg_switch_${requests.length}`, type: "message", role: "assistant", content: [], model: body.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } })
+				+ block.join("")
+				+ event("content_block_stop", { type: "content_block_stop", index: 0 })
+				+ event("message_delta", { type: "message_delta", delta: { stop_reason: callTool ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } })
+				+ event("message_stop", { type: "message_stop" }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	let parked;
+	const released = new Promise((resolve) => { parked = resolve; });
+	let answer;
+	const answered = new Promise((resolve) => { answer = resolve; });
+	const mcp = new McpServer({ name: "custom-tools", version: "1.0.0" }, { capabilities: { tools: {} } });
+	mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [noArgTool("marker")] }));
+	mcp.server.setRequestHandler(CallToolRequestSchema, async () => { parked(); await answered; return { content: [{ type: "text", text: "MARKER_OK" }] }; });
+	let close;
+	const held = new Promise((resolve) => { close = resolve; });
+	async function* prompt() {
+		yield { type: "user", message: { role: "user", content: "SWITCH-PROBE" }, parent_tool_use_id: null };
+		await held;
+	}
+	// The bridge sends 1M models as `<id>[1m]`; CC strips the suffix and adds the 1M beta.
+	const SWITCHED = "claude-sonnet-4-5[1m]";
+	try {
+		const q = query({ prompt: prompt(), options: providerOptions({
+			mcpServers: { "custom-tools": { type: "sdk", name: "custom-tools", instance: mcp } },
+			env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+		}) });
+		const assistantModels = [];
+		const drained = (async () => {
+			for await (const message of q) {
+				if (message.type === "assistant") assistantModels.push(message.message.model);
+				if (message.type === "result") { close(); return message; }
+			}
+		})();
+		await released;
+		const set = await Promise.race([q.setModel(SWITCHED).then(() => "done"), new Promise((r) => setTimeout(() => r("timeout"), 10_000))]);
+		answer();
+		assert.equal(set, "done", "setModel does not complete while a tool call is parked");
+		const result = await drained;
+		assert.ok(result, "the query never finished");
+		assert.equal(requests.length, 2, `expected the tool call and the continuation, got ${requests.length} turn requests`);
+		assert.equal(requests[0].model, MODEL);
+		assert.ok(JSON.stringify(requests[1].messages).includes("MARKER_OK"), "the continuation lost the tool result");
+		assert.equal(requests[1].model, "claude-sonnet-4-5", "setModel while a tool is parked no longer changes the same turn's next request; src/index.ts must rebuild the query to honor a switch at a tool result");
+		assert.ok(!requests[0].beta.includes("context-1m") && requests[1].beta.includes("context-1m"), "a [1m] model set mid-turn does not get the 1M context beta");
+		assert.deepEqual(assistantModels, [MODEL, "claude-sonnet-4-5"], "the assistant messages do not report the model that served each request");
+	} finally {
+		close();
+		answer();
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
 test("CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1 stops CC resuming a turn that ends at a tool result", { timeout: 120_000 }, async () => {
 	// A rebuild after a terminating tool, or after a parked query was discarded, ends
 	// at a tool result, which CC reads as an interrupted turn. Behind a server flag it
