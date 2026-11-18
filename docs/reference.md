@@ -30,7 +30,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 ```
 
 `provider`:
-- `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus with 1M context.
+- `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus 4.6 with 1M context; newer Opus models get 1M on every plan.
 - `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro. Not needed for Opus 4.7 or 4.8.
 - `forceTwoHundredK` — array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if pi-ai declares a model at 1M but Claude Code won't serve it on your plan.
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
@@ -40,7 +40,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
 
 
-**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. The `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool are ignored.
+**Leftover keys:** the bridge never writes to its config. A `startupNoticeShown` mark left by older versions, and the `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool, are ignored.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
