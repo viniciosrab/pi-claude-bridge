@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel } from "../src/models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, extraUsageByChoice, resolveClaudeCodeRuntimeModel } from "../src/models.js";
 import { getModels } from "@earendil-works/pi-ai/compat";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
@@ -149,6 +149,31 @@ describe("claudeCodeModelId", () => {
 		assert.equal(claudeCodeModelId({ id: "claude-opus-5", contextWindow: 1000000 }, PRO), "claude-opus-5[1m]");
 		assert.equal(claudeCodeModelId({ id: "claude-opus-4-7", contextWindow: 1000000 }, PRO), "claude-opus-4-7[1m]");
 		assert.equal(claudeCodeModelId({ id: "claude-haiku-4-5", contextWindow: 200000 }, PRO), "claude-haiku-4-5");
+	});
+});
+
+describe("extraUsageByChoice", () => {
+	it("is true when a plan-gated 1M runs only because Extra Usage is on", () => {
+		assert.equal(extraUsageByChoice({ id: "claude-sonnet-4-6" }, EXTRA), true);
+		assert.equal(extraUsageByChoice({ id: "claude-opus-4-6" }, EXTRA), true);
+	});
+
+	it("is false when the plan alone serves 1M", () => {
+		assert.equal(extraUsageByChoice({ id: "claude-opus-4-6" }, { ...MAX, longContextExtraUsage: true }), false);
+	});
+
+	it("is false with Extra Usage off", () => {
+		assert.equal(extraUsageByChoice({ id: "claude-sonnet-4-6" }, PRO), false);
+		assert.equal(extraUsageByChoice({ id: "claude-opus-4-6" }, MAX), false);
+	});
+
+	it("is false when the model is forced to 200K", () => {
+		assert.equal(extraUsageByChoice({ id: "claude-sonnet-4-6" }, { ...EXTRA, forceTwoHundredK: ["claude-sonnet-4-6"] }), false);
+	});
+
+	it("is false for models that are not plan-gated", () => {
+		assert.equal(extraUsageByChoice({ id: "claude-opus-5" }, EXTRA), false);
+		assert.equal(extraUsageByChoice({ id: "claude-future-9-9" }, EXTRA), false);
 	});
 });
 

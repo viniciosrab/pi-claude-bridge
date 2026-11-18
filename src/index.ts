@@ -12,7 +12,7 @@ import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, Erro
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
-import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings } from "./models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, extraUsageByChoice, type LongContextSettings } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
@@ -550,6 +550,10 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 	return `Claude quota exceeded — rate limit${kind}${resets}: ${failure}`;
 }
 
+/** Why Anthropic would bill or refuse Extra Usage with the plan limit not reached: it
+ *  classifies some system prompts as a third-party app's (upstream f14f2ed). */
+const THIRD_PARTY_SUSPECT = "no plan limit was reported as reached, so Anthropic may have read the system prompt as a third-party app";
+
 /** Reports to the call that owns the open stream, before its next event, as pi's own
  *  providers do. A failing consumer must not end the turn it is observing. */
 async function reportHeldRateLimit(c: QueryContext, model: Model<any>): Promise<void> {
@@ -935,6 +939,12 @@ export const __test = {
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
 		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
+	},
+	/** Returns the previous settings so a test can restore them. */
+	setLongContextSettings(settings: LongContextSettings): LongContextSettings {
+		const previous = longContextSettings;
+		longContextSettings = settings;
+		return previous;
 	},
 	toBridgeContext,
 	isolatedStreamFn,
@@ -1736,6 +1746,9 @@ async function consumeQuery(
 				if (queryCtx.rateLimitRejection) {
 					resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
 					queryCtx.rateLimitRejection = null;
+				} else if (resultError.includes("out of extra usage") && !extraUsageByChoice(model, longContextSettings)) {
+					// Extra Usage off or empty, and no plan window was rejected first.
+					resultError += ` (${THIRD_PARTY_SUSPECT})`;
 				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
 				if (queryCtx.turnOutput && queryCtx.currentPiStream) {
@@ -1754,6 +1767,13 @@ async function consumeQuery(
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			if (info) queryCtx.heldRateLimit = info;
 			await reportHeldRateLimit(queryCtx, model);
+			// CC sets isUsingOverage only when a rejected plan window is served from Extra
+			// Usage; overageInUse alone means the request was billed there anyway.
+			if (info?.overageInUse === true && info.status !== "rejected" && info.isUsingOverage !== true
+				&& !extraUsageByChoice(model, longContextSettings) && !queryCtx.warnedUnplannedOverage) {
+				queryCtx.warnedUnplannedOverage = true;
+				piUI?.notify(`Claude Code request billed to Extra Usage: ${THIRD_PARTY_SUSPECT}, or this model needs usage credits on your plan`, "warning");
+			}
 			if (info?.status === "rejected") {
 				// Held so the failure Claude Code sends next can be named as a rate limit.
 				queryCtx.rateLimitRejection = info;

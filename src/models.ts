@@ -149,6 +149,14 @@ export function resolveClaudeCodeRuntimeModel(
 	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 }
 
+/** The model runs at 1M only because the user chose to pay for it through Extra
+ *  Usage, so its requests bill there with the plan limit not reached. */
+export function extraUsageByChoice(model: { id: string }, settings: LongContextSettings): boolean {
+	const planGate = PLAN_GATED_ONE_M[model.id];
+	return !!planGate && settings.longContextExtraUsage && !settings.forceTwoHundredK?.includes(model.id)
+		&& !planGate({ ...settings, longContextExtraUsage: false });
+}
+
 export function claudeCodeModelId(model: { id: string }, settings: LongContextSettings): string {
 	return resolveClaudeCodeRuntimeModel(model, settings).cliModelId;
 }

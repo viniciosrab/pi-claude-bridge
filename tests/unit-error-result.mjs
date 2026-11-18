@@ -108,6 +108,55 @@ describe("a rate-limited failure", () => {
 	});
 });
 
+// Recorded upstream 2026-11-10 (f14f2ed): Extra Usage off, pi 1.4.0's prompt appended,
+// plan at 16%. No rate_limit_event precedes it.
+describe("an extra-usage refusal with no plan window rejected", () => {
+	const SUFFIX = " (no plan limit was reported as reached, so Anthropic may have read the system prompt as a third-party app)";
+	const refusal = {
+		type: "result", subtype: "success", is_error: true, api_error_status: 400,
+		result: "API Error: 400 You're out of extra usage. Add more at claude.ai/settings/usage and keep going.",
+	};
+
+	it("says the system prompt may have been read as a third-party app", async () => {
+		const c = makeCtx();
+		await consume(c, [refusal]);
+
+		assert.strictEqual(c.turnOutput.errorMessage, refusal.result + SUFFIX);
+	});
+
+	it("is named as a rate limit instead when a plan window was rejected first", async () => {
+		const rejection = { type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour" } };
+		const c = makeCtx();
+		await consume(c, [rejection, refusal]);
+
+		assert.match(c.turnOutput.errorMessage, RATE_LIMIT);
+		assert.doesNotMatch(c.turnOutput.errorMessage, /third-party app/);
+	});
+
+	it("is left alone when the user chose Extra Usage for the model's 1M context", async () => {
+		const sonnet46 = { ...fakeModel, id: "claude-sonnet-4-6" };
+		const previous = __test.setLongContextSettings({ plan: "pro", longContextExtraUsage: true });
+		try {
+			const c = new QueryContext();
+			c.currentPiStream = fakeStream();
+			c.resetTurnState(sonnet46);
+			async function* gen() { yield refusal; }
+			await __test.consumeQuery(gen(), toolMap, sonnet46, () => false, c);
+
+			assert.strictEqual(c.turnOutput.errorMessage, refusal.result);
+		} finally {
+			__test.setLongContextSettings(previous);
+		}
+	});
+
+	it("leaves other failures alone", async () => {
+		const c = makeCtx();
+		await consume(c, [errorResult]);
+
+		assert.doesNotMatch(c.turnOutput.errorMessage, /third-party app/);
+	});
+});
+
 describe("error results", () => {
 	it("marks the turn errored and finalizes with an error event", async () => {
 		const c = makeCtx();
