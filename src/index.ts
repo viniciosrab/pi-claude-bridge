@@ -1775,6 +1775,8 @@ async function consumeQuery(
 		const recordStreamPath = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 		if (recordStreamPath) appendFileSync(recordStreamPath, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
+		// The model serving this query: a switch at a tool result changes it mid-query (upstream #273).
+		const served = queryCtx.servedModel ?? model;
 		// A continuation's fallback waits for this (upstream #274). Only this context's live
 		// query marks it: a discarded one still flushing must not disarm its replacement's.
 		if (!queryCtx.sawTurnWork && queryCtx.activeQuery === sdkQuery && showsTurnWork(message)) {
@@ -1789,7 +1791,7 @@ async function consumeQuery(
 			failRejectedToolCall(queryCtx, rejection);
 			return { capturedSessionId };
 		}
-		await reportHeldRateLimit(queryCtx, model);
+		await reportHeldRateLimit(queryCtx, served);
 		// Everything below the currentPiStream guard is content, which there is
 		// nowhere to put once a turn has ended on a tool call. Handle lifecycle
 		// messages before that gate:
@@ -1811,7 +1813,7 @@ async function consumeQuery(
 		}
 		let resultError: string | undefined;
 		if (message.type === "result") {
-			logServedContextWindow("result", message, model);
+			logServedContextWindow("result", message, served);
 			resultError = resultErrorText(message);
 			// A result ends a turn, not necessarily the query: steers not yet replayed
 			// can still start a later turn.
@@ -1822,7 +1824,7 @@ async function consumeQuery(
 				if (queryCtx.rateLimitRejection) {
 					resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
 					queryCtx.rateLimitRejection = null;
-				} else if (resultError.includes("out of extra usage") && !extraUsageByChoice(model, longContextSettings)) {
+				} else if (resultError.includes("out of extra usage") && !extraUsageByChoice(served, longContextSettings)) {
 					// Extra Usage off or empty, and no plan window was rejected first.
 					resultError += ` (${THIRD_PARTY_SUSPECT})`;
 				}
@@ -1842,11 +1844,11 @@ async function consumeQuery(
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			if (info) queryCtx.heldRateLimit = info;
-			await reportHeldRateLimit(queryCtx, model);
+			await reportHeldRateLimit(queryCtx, served);
 			// CC sets isUsingOverage only when a rejected plan window is served from Extra
 			// Usage; overageInUse alone means the request was billed there anyway.
 			if (info?.overageInUse === true && info.status !== "rejected" && info.isUsingOverage !== true
-				&& !extraUsageByChoice(model, longContextSettings) && !queryCtx.warnedUnplannedOverage) {
+				&& !extraUsageByChoice(served, longContextSettings) && !queryCtx.warnedUnplannedOverage) {
 				queryCtx.warnedUnplannedOverage = true;
 				piUI?.notify(`Claude Code request billed to Extra Usage: ${THIRD_PARTY_SUSPECT}, or this model needs usage credits on your plan`, "warning");
 			}
@@ -1886,10 +1888,10 @@ async function consumeQuery(
 
 		switch (message.type) {
 			case "stream_event":
-				processStreamEvent(message, customToolNameToPi, model, queryCtx);
+				processStreamEvent(message, customToolNameToPi, served, queryCtx);
 				break;
 			case "assistant":
-				processAssistantMessage(message, model, customToolNameToPi, queryCtx);
+				processAssistantMessage(message, served, customToolNameToPi, queryCtx);
 				break;
 			case "result": {
 					// The failure itself was recorded above the guard, along with the served
@@ -1970,6 +1972,25 @@ function steerMissedSession(c: QueryContext, text: string): void {
  *
  *  Both the post-tool-call drain and the FIFO ordering are CC CLI internals,
  *  not SDK contract — tests/int-tool-message.mjs is the tripwire if they move. */
+/** Switch a query parked at a tool boundary to `model` before its results go in.
+ *  Never rejects: a refused switch leaves the query on the model serving it. */
+async function switchRunningModel(c: QueryContext, model: Model<any>): Promise<void> {
+	const served = c.servedModel;
+	const cliModel = claudeCodeModelId(model, longContextSettings);
+	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void> } | null;
+	try {
+		if (!q?.setModel) throw new Error("the query cannot switch models");
+		await q.setModel(cliModel);
+	} catch (error) {
+		debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${served?.id ?? "?"} until the next prompt:`, error);
+		return;
+	}
+	debug(`provider: switched the running query from ${served?.id ?? "?"} to ${cliModel} at a tool result`);
+	c.servedModel = model;
+	// Nothing of the continuation has streamed yet: the results are delivered after this.
+	if (c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+}
+
 async function deliverToolResults(
 	c: QueryContext,
 	results: McpResult[],
@@ -2268,10 +2289,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// handlers. Results that arrive before their handler get queued in pendingResults.
 	if (resultCtx) {
 		claimCurrentPiStream(stream, "tool-result", resultCtx, options);
-		// The running query answers on the model it was started with: pi switching
-		// models here takes effect at the next prompt, which opens a fresh query.
+		// pi switched models between a tool call and its result (`/model` while a tool
+		// runs, or a router): switch the running query before the result reaches it,
+		// since CC applies setModel to the same turn's next request (upstream #273,
+		// pinned in tests/int-cc-contracts.mjs). The turn is labeled with the serving
+		// model until the switch succeeds; a refused switch keeps it, and the next
+		// prompt opens a fresh query on the requested model.
 		const served = resultCtx.servedModel ?? model;
-		if (served.id !== model.id) debug(`provider: ${model.id} requested at a tool result, query continues on ${served.id} until the next prompt`);
+		const switchTo = claudeCodeModelId(served, longContextSettings) !== claudeCodeModelId(model, longContextSettings) ? model : null;
 		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
@@ -2286,7 +2311,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// Delivery is async because the steer must reach CC's stdin *before* the
 		// tool result does — see deliverToolResults. Detached so the provider
 		// still returns its stream synchronously.
-		void deliverToolResults(resultCtx, allResults, steer, context.messages.length);
+		const deliverTo = resultCtx;
+		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo) : Promise.resolve();
+		void delivering.then(() => deliverToolResults(deliverTo, allResults, steer, context.messages.length));
 		// The shared cursor tracks the top-level conversation. A reentrant subagent
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next

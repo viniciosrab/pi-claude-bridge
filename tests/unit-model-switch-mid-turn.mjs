@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ctx } from "../src/query-state.js";
 
 const claudeDir = mkdtempSync(join(tmpdir(), "claude-bridge-model-switch-cc-"));
 process.env.CLAUDE_CONFIG_DIR = claudeDir;
@@ -48,11 +49,18 @@ const toolResult = { role: "toolResult", toolCallId: "toolu_1", toolName: "read"
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 
 const started = [];
+const setModels = [];
 let release;
+let setModelFails = false;
+/** Results the bridge had handed the query when each setModel call was made. */
+const resultsAtSwitch = [];
 beforeEach(() => {
 	resetSharedSession();
 	activeQueryContexts.clear();
 	started.length = 0;
+	setModels.length = 0;
+	setModelFails = false;
+	resultsAtSwitch.length = 0;
 	setQuery(({ prompt, options }) => {
 		started.push(options.extraArgs?.model ?? options.model);
 		const gate = new Promise((r) => { release = r; });
@@ -68,6 +76,12 @@ beforeEach(() => {
 				for (const step of answer("fresh")) yield step;
 			}
 		})();
+		gen.setModel = async (m) => {
+			await new Promise((r) => setTimeout(r, 5));
+			setModels.push(m);
+			resultsAtSwitch.push(ctx().pendingResults.size);
+			if (setModelFails) throw new Error("setModel refused");
+		};
 		gen.interrupt = async () => {};
 		gen.close = () => {};
 		return gen;
@@ -75,24 +89,62 @@ beforeEach(() => {
 });
 afterEach(() => setQuery(null));
 
-it("labels a tool-result continuation with the model that served it; the next prompt switches", async () => {
-	assert.ok(second && first.id !== second.id, "the provider registers two models");
-	const ask = user("read a");
-	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: "pi-switch", signal: new AbortController().signal }).result();
-	assert.equal(parked.stopReason, "toolUse");
+const escape = (id) => new RegExp(id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 
-	const continuation = streamSimple(second, { messages: [ask, parked, toolResult], tools }, { sessionId: "pi-switch", signal: new AbortController().signal });
+async function switchAtToolResult(sid) {
+	const ask = user("read a");
+	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: sid, signal: new AbortController().signal }).result();
+	assert.equal(parked.stopReason, "toolUse");
+	const continuation = streamSimple(second, { messages: [ask, parked, toolResult], tools }, { sessionId: sid, signal: new AbortController().signal });
+	// Claude Code continues once the result reaches it; this fake has no MCP handler
+	// waiting, so the bridge queues the result, and the fake goes on once it is there.
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
 	release();
-	const continued = await continuation.result();
-	assert.equal(started.length, 1, "the result went to the running query");
+	return { ask, parked, continued: await continuation.result() };
+}
+
+it("switches the running query to the model requested at a tool result, and labels the continuation with it", async () => {
+	assert.ok(second && first.id !== second.id, "the provider registers two models");
+	const { ask, parked, continued } = await switchAtToolResult("pi-switch");
+	assert.equal(started.length, 1, "the result went to the running query, no rebuild");
+	assert.equal(setModels.length, 1, "the running query was switched once");
+	assert.match(setModels[0], escape(second.id), "to the requested model");
+	assert.deepEqual(resultsAtSwitch, [0], "before the tool result reached the query");
 	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	assert.equal(continued.model, second.id, "labeled with the model that served it");
+	assert.equal(continued.provider, second.provider);
+	assert.equal(continued.api, second.api);
+
+	// The query now runs on the second model: the next prompt switches nothing.
+	const next = await streamSimple(second, { messages: [ask, parked, toolResult, continued, user("again")], tools },
+		{ sessionId: "pi-switch", signal: new AbortController().signal }).result();
+	assert.equal(next.model, second.id);
+	assert.equal(setModels.length, 1);
+});
+
+it("keeps the served model's label when Claude Code refuses the switch; the next prompt switches", async () => {
+	setModelFails = true;
+	const { ask, parked, continued } = await switchAtToolResult("pi-refused");
+	assert.equal(setModels.length, 1, "the switch was attempted");
+	assert.equal(started.length, 1, "the result still went to the running query");
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued", "the turn still continued");
 	assert.equal(continued.model, first.id, "labeled with the model that served it");
 	assert.equal(continued.provider, first.provider);
 	assert.equal(continued.api, first.api);
 
 	const next = await streamSimple(second, { messages: [ask, parked, toolResult, continued, user("again")], tools },
-		{ sessionId: "pi-switch", signal: new AbortController().signal }).result();
+		{ sessionId: "pi-refused", signal: new AbortController().signal }).result();
 	assert.equal(started.length, 2, "the next prompt opened a fresh query");
-	assert.match(started[1], new RegExp(second.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "on the requested model");
+	assert.match(started[1], escape(second.id), "on the requested model");
 	assert.equal(next.model, second.id);
+});
+
+it("does not switch when the model requested at a tool result is the one serving", async () => {
+	const ask = user("read a");
+	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: "pi-same", signal: new AbortController().signal }).result();
+	const continuation = streamSimple(first, { messages: [ask, parked, toolResult], tools }, { sessionId: "pi-same", signal: new AbortController().signal });
+	release();
+	const continued = await continuation.result();
+	assert.equal(continued.model, first.id);
+	assert.deepEqual(setModels, []);
 });
