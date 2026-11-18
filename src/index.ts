@@ -1988,19 +1988,25 @@ async function switchRunningModel(c: QueryContext, model: Model<any>, waitMs = s
 	const served = c.servedModel;
 	const cliModel = claudeCodeModelId(model, longContextSettings);
 	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void> } | null;
+	c.switchingTo = model;
 	const switched = (async () => {
 		try {
 			if (!q?.setModel) throw new Error("the query cannot switch models");
 			await q.setModel(cliModel);
 		} catch (error) {
-			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${served?.id ?? "?"} until the next prompt:`, error);
+			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${c.servedModel?.id ?? "?"} until the next prompt:`, error);
 			return;
+		} finally {
+			// CC settles switches in the order they were sent: only the latest clears the mark.
+			if (c.switchingTo === model && c.activeQuery === q) c.switchingTo = null;
 		}
 		// A query that ended or was replaced meanwhile serves nothing more.
 		if (c.activeQuery !== q) return;
 		debug(`provider: switched the running query from ${served?.id ?? "?"} to ${cliModel} at a tool result`);
 		c.servedModel = model;
-		if (c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+		// Relabel only a turn whose response has not started: one already streaming or
+		// ended (the message pi recorded) was served by the model before the switch.
+		if (c.currentPiStream && !c.turnStarted && c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
 	})();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });
@@ -2315,7 +2321,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// model until the switch succeeds; a refused switch keeps it, and the next
 		// prompt opens a fresh query on the requested model.
 		const served = resultCtx.servedModel ?? model;
-		const switchTo = claudeCodeModelId(served, longContextSettings) !== claudeCodeModelId(model, longContextSettings) ? model : null;
+		const bound = resultCtx.switchingTo ?? served; // a switch still in flight is what CC will serve
+		const switchTo = claudeCodeModelId(bound, longContextSettings) !== claudeCodeModelId(model, longContextSettings) ? model : null;
 		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
@@ -2331,8 +2338,17 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// tool result does — see deliverToolResults. Detached so the provider
 		// still returns its stream synchronously.
 		const deliverTo = resultCtx;
+		const parkedQuery = resultCtx.activeQuery;
 		const delivering = switchTo ? switchRunningModel(deliverTo, switchTo) : Promise.resolve();
-		void delivering.then(() => deliverToolResults(deliverTo, allResults, steer, context.messages.length));
+		void delivering.then(() => {
+			// The query may have ended while the switch was pending (an abort closes it);
+			// its results must not reach a query that took over this context since.
+			if (deliverTo.activeQuery !== parkedQuery) {
+				debug(`provider: the query ended during a model switch, tool results not delivered`);
+				return;
+			}
+			void deliverToolResults(deliverTo, allResults, steer, context.messages.length);
+		});
 		// The shared cursor tracks the top-level conversation. A reentrant subagent
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
@@ -2418,6 +2434,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
 	queryCtx.servedModel = model;
+	queryCtx.switchingTo = null;
 	queryCtx.latestCursor = 0;
 	latestSent.delete(queryCtx); // fork: reopen resume
 	// The served pi session, for rewrite attribution on delivery (issue #101

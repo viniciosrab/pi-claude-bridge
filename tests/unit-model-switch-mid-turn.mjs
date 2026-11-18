@@ -51,6 +51,9 @@ const tools = [{ name: "read", description: "Read a file", parameters: { type: "
 const started = [];
 const setModels = [];
 let release;
+let release2;
+/** A query that makes a second tool call after the first result. */
+let secondTool = false;
 let setModelFails = false;
 let setModelDelayMs = 5;
 /** Results the bridge had handed the query when each setModel call was made. */
@@ -62,18 +65,27 @@ beforeEach(() => {
 	setModels.length = 0;
 	setModelFails = false;
 	setModelDelayMs = 5;
+	secondTool = false;
 	mod.__test.setSwitchModelWaitMs(null);
 	resultsAtSwitch.length = 0;
 	setQuery(({ prompt, options }) => {
 		started.push(options.extraArgs?.model ?? options.model);
 		const gate = new Promise((r) => { release = r; });
+		const gate2 = new Promise((r) => { release2 = r; });
+		const twice = secondTool;
+		let onClose;
+		const killed = new Promise((r) => { onClose = () => r("killed"); });
 		const fresh = started.length === 1;
 		const gen = (async function* () {
 			await prompt[Symbol.asyncIterator]().next();
 			yield { type: "system", subtype: "init", session_id: "cc-switch" };
 			if (fresh) {
 				for (const step of toolUse) yield step;
-				await gate;
+				if (await Promise.race([gate, killed]) === "killed") return;
+				if (twice) {
+					for (const step of toolUse) yield JSON.parse(JSON.stringify(step).replaceAll("toolu_1", "toolu_2").replaceAll("msg_tool", "msg_tool_2"));
+					if (await Promise.race([gate2, killed]) === "killed") return;
+				}
 				for (const step of answer("continued")) yield step;
 			} else {
 				for (const step of answer("fresh")) yield step;
@@ -86,7 +98,7 @@ beforeEach(() => {
 			if (setModelFails) throw new Error("setModel refused");
 		};
 		gen.interrupt = async () => {};
-		gen.close = () => {};
+		gen.close = () => onClose();
 		return gen;
 	});
 });
@@ -163,4 +175,64 @@ it("delivers the tool result when the switch outlasts the wait, so a slow switch
 	assert.deepEqual(setModels, [], "the switch had not landed");
 	await new Promise((r) => setTimeout(r, 350));
 	assert.equal(setModels.length, 1, "the switch still went through");
+	assert.equal(continued.model, first.id, "a switch landing after the turn ended does not relabel the message pi recorded");
+	assert.equal(continued.provider, first.provider);
+});
+
+it("drops tool results held by a switch when their query ended meanwhile, so they never reach the next query", async () => {
+	mod.__test.setSwitchModelWaitMs(1_000);
+	setModelDelayMs = 100;
+	const ask = user("read a");
+	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: "pi-ended", signal: new AbortController().signal }).result();
+	const controller = new AbortController();
+	const continuation = streamSimple(second, { messages: [ask, parked, toolResult], tools }, { sessionId: "pi-ended", signal: controller.signal });
+	controller.abort();
+	await continuation.result();
+	release();
+	await new Promise((r) => setTimeout(r, 20)); // the aborted query's teardown
+	const next = streamSimple(second, { messages: [ask, parked, toolResult, user("again")], tools }, { sessionId: "pi-ended", signal: new AbortController().signal });
+	await new Promise((r) => setTimeout(r, 150)); // the switch settles
+	assert.ok(!ctx().pendingResults.has("toolu_1"), "the ended query's result reached the next query");
+	await next.result();
+});
+
+/** A switch at the first tool result that outlasts the wait, the query going on to a
+ *  second tool call before it lands. */
+async function slowSwitchThenSecondTool(sid) {
+	mod.__test.setSwitchModelWaitMs(20);
+	setModelDelayMs = 150;
+	secondTool = true;
+	const ask = user("read a");
+	const parked = await streamSimple(first, { messages: [ask], tools }, { sessionId: sid, signal: new AbortController().signal }).result();
+	const continuation = streamSimple(second, { messages: [ask, parked, toolResult], tools }, { sessionId: sid, signal: new AbortController().signal });
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parkedAgain = await continuation.result();
+	assert.equal(parkedAgain.stopReason, "toolUse", "the query went on to a second tool call");
+	return { ask, parked, parkedAgain };
+}
+const secondResult = { role: "toolResult", toolCallId: "toolu_2", toolName: "read", content: [{ type: "text", text: "MARKER_2" }], isError: false, timestamp: clock++ };
+
+it("a switch landing while the query is parked on a later tool call does not relabel the message pi recorded", async () => {
+	const { parkedAgain } = await slowSwitchThenSecondTool("pi-late-label");
+	assert.deepEqual(setModels, [], "the response streamed before the switch landed");
+	await new Promise((r) => setTimeout(r, 200));
+	assert.equal(setModels.length, 1, "the switch landed");
+	assert.equal(parkedAgain.model, first.id, "the old model served that response");
+	assert.equal(parkedAgain.provider, first.provider);
+	release2();
+	await new Promise((r) => setTimeout(r, 20)); // the query ends before the next test
+});
+
+it("a model requested again while a switch is still pending is switched to, not lost", async () => {
+	const { ask, parked, parkedAgain } = await slowSwitchThenSecondTool("pi-back");
+	// pi goes back to the first model while the switch to the second is still in flight.
+	const back = streamSimple(first, { messages: [ask, parked, toolResult, parkedAgain, secondResult], tools }, { sessionId: "pi-back", signal: new AbortController().signal });
+	await new Promise((r) => setTimeout(r, 400)); // both switches settle
+	release2();
+	const done = await back.result();
+	assert.equal(setModels.length, 2, "the request at the second boundary was sent");
+	assert.match(setModels[0], escape(second.id));
+	assert.match(setModels[1], escape(first.id));
+	assert.equal(done.model, first.id, "the last request won");
 });
