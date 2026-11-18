@@ -1642,6 +1642,29 @@ function toolCallRejection(message: SDKMessage, c: QueryContext): { toolCallId: 
 	return { toolCallId: id, describe: (when) => `Claude Code rejected pi's tool call "${name}" ${when}. Claude Code said: ${JSON.stringify(reason.trim())}` };
 }
 
+/** Take a call Claude Code rejected before pi was handed it out of the turn, and let
+ *  the query go on: CC answers the call with its own rejection and asks the model
+ *  again, as it does for a call Claude Code makes natively, so the model's retry
+ *  streams into this same pi turn. Nothing reached pi or the MCP handler, so nothing
+ *  ran. False when the call is not in the open stream (pi has it, or ran it).
+ *
+ *  The turn's message is replaced, not edited in place: the events already pushed
+ *  carry the old one as `partial`, and a consumer that reads its queue late (pi's JSON
+ *  mode) resolves each toolcall_start against it, so its indices must not move. */
+function dropRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; describe: (when: string) => string }): boolean {
+	if (!c.currentPiStream || !c.turnOutput) return false;
+	const index = c.turnBlocks.findIndex((b: any) => b.type === "toolCall" && b.id === rejection.toolCallId);
+	if (index < 0) return false;
+	debug(`consumeQuery: ${rejection.describe("before pi got it")}; dropped it, Claude Code asks the model again`);
+	c.turnOutput = { ...c.turnOutput, content: c.turnBlocks.filter((_: unknown, i: number) => i !== index) };
+	if (index < c.turnStreamBlockStart) c.turnStreamBlockStart--;
+	c.turnToolCallIds = c.turnToolCallIds.filter((id) => id !== rejection.toolCallId);
+	c.turnSawToolCall = c.turnBlocks.some((b: any) => b.type === "toolCall");
+	// A fallback's pending stop would end the turn on no tool calls at all.
+	if (!c.turnSawToolCall) c.clearToolUseSettle();
+	return true;
+}
+
 /** End a query whose tool call Claude Code rejected itself. Nothing will ever answer
  *  the call pi was handed, and CC goes on to retry a tool pi may already be running,
  *  so the query goes the way failLostToolCall's does: discarded, its parked handlers
@@ -1651,9 +1674,8 @@ function toolCallRejection(message: SDKMessage, c: QueryContext): { toolCallId: 
  *  its next provider call carrying that result fails instead (rejectedToolCalls). */
 function failRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; describe: (when: string) => string }): void {
 	const running = !c.currentPiStream;
-	const beforePi = !running && c.turnBlocks.some((b: any) => b.type === "toolCall" && b.id === rejection.toolCallId);
-	debug(`consumeQuery: Claude Code rejected tool call [${rejection.toolCallId}] ${running ? "while pi runs it" : beforePi ? "before pi got it" : "after pi ran it"}, ending the query`);
-	const error = rejection.describe(running ? "after pi had started running it" : beforePi ? "before pi started running it" : "after pi ran it");
+	debug(`consumeQuery: Claude Code rejected tool call [${rejection.toolCallId}] ${running ? "while pi runs it" : "after pi ran it"}, ending the query`);
+	const error = rejection.describe(running ? "after pi had started running it" : "after pi ran it");
 	if (running) rejectedToolCalls.set(c.piSessionId, { toolCallId: rejection.toolCallId, error });
 	c.clearToolUseSettle();
 	discardQuery(c, `Claude Code rejected tool call ${rejection.toolCallId}; the turn was ended.`);
@@ -1691,6 +1713,7 @@ async function consumeQuery(
 		// no stream open. The discarded query's completion leaves everything alone.
 		const rejection = toolCallRejection(message, queryCtx);
 		if (rejection) {
+			if (dropRejectedToolCall(queryCtx, rejection)) continue;
 			failRejectedToolCall(queryCtx, rejection);
 			return { capturedSessionId };
 		}

@@ -5,9 +5,10 @@
  * tool_result for it. Nothing will ever answer the call pi was handed, so the turn
  * used to sit on "Working" until aborted.
  *
- * A call rejected before pi is handed it fails the turn, so pi runs none of its
- * calls; one rejected while pi runs it, or after, also fails, and the next prompt
- * carries pi's result, not Claude Code's rejection. A served name in the wrong case
+ * A call rejected before pi is handed it never reaches pi: Claude Code answers it
+ * with its rejection and asks the model again, as it does natively, and the turn
+ * goes on with the retry. One rejected while pi runs it, or after, fails the turn,
+ * and the next prompt carries pi's result, not Claude Code's rejection. A served name in the wrong case
  * is not a rejection: it never reaches pi, and Claude Code retries under the served
  * name.
  */
@@ -144,17 +145,26 @@ function blockingHook(name, sleepSeconds) {
 	return { hooks: { PreToolUse: [{ matcher: "mcp__custom-tools__probe", hooks: [{ type: "command", command: script }] }] } };
 }
 
-it("a call a permissions.deny rule rejects before pi gets it fails the turn", { timeout: 60_000 }, async () => {
+const toolCalls = (message) => message.content.filter((b) => b.type === "toolCall").map((b) => [b.name, b.id]);
+
+it("a call a permissions.deny rule rejects before pi gets it never reaches pi, and the model is told why", { timeout: 60_000 }, async () => {
 	const s = session("pi-deny", { permissions: { deny: ["mcp__custom-tools__probe"] } }, [[{ name: "probe" }]]);
 	const message = await s.call();
-	assert.equal(message.stopReason, "error");
-	assert.match(message.errorMessage, /^Claude Code rejected pi's tool call "probe" before pi started running it\. Claude Code said: ".*Permission to use mcp__custom-tools__probe has been denied.*"$/);
+	assert.equal(message.stopReason, "stop", message.errorMessage);
+	assert.deepEqual(toolCalls(message), []);
+	assert.deepEqual(message.content.filter((b) => b.type === "text").map((b) => b.text), [`Step ${requests - 1}.`, `Step ${requests}.`]);
+	assert.ok(bodies.at(-1).includes("Permission to use mcp__custom-tools__probe has been denied"), "the model never saw Claude Code's rejection");
 	await s.nextPrompt();
 });
 
-it("a rejected call with a valid sibling leaves no unanswered tool calls in the next request", { timeout: 60_000 }, async () => {
+it("a rejected call with a valid sibling: pi runs only the sibling, and no request has unanswered tool calls", { timeout: 60_000 }, async () => {
 	const s = session("pi-denied-batch", { permissions: { deny: ["mcp__custom-tools__probe"] } }, [[{ name: "probe" }, { name: "fast" }]]);
-	assert.equal((await s.call()).stopReason, "error");
+	const first = await s.call();
+	assert.equal(first.stopReason, "toolUse", first.errorMessage);
+	assert.deepEqual(toolCalls(first), [["fast", `toolu_${requests}_1`]]);
+	s.returnResults(first);
+	assert.equal((await s.call()).stopReason, "stop");
+	assert.ok(bodies.at(-1).includes(s.resultText), "pi's result for fast is missing from the request after it");
 	const messages = JSON.parse(await s.nextPrompt());
 	const pending = new Set();
 	for (const message of messages) {
@@ -166,12 +176,17 @@ it("a rejected call with a valid sibling leaves no unanswered tool calls in the 
 	assert.deepEqual([...pending], [], "the next request contains unanswered tool calls");
 });
 
-it("input that is not JSON fails the turn before pi runs any of the message's calls", { timeout: 60_000 }, async () => {
-	const s = session("pi-bad-json", {}, [[{ name: "probe", json: '{"path": "C:\\pi\\x"}' }, { name: "fast" }]]);
+it("input that is not JSON never reaches pi, and the model's retry with valid JSON does", { timeout: 60_000 }, async () => {
+	// A raw tab inside a JSON string, the way a model writes a tab-indented edit.
+	const s = session("pi-bad-json", {}, [[{ name: "probe", json: '{"path": "a\tb"}' }], [{ name: "probe", json: '{"path": "a\\tb"}' }]]);
 	const message = await s.call();
-	assert.equal(message.stopReason, "error");
-	assert.match(message.errorMessage, /"probe" before pi started running it.*InputValidationError/);
-	await s.nextPrompt();
+	assert.equal(message.stopReason, "toolUse", message.errorMessage);
+	assert.deepEqual(toolCalls(message), [["probe", `toolu_${requests}_0`]]);
+	assert.equal(message.content.find((b) => b.type === "toolCall").arguments.path, "a\tb");
+	assert.ok(bodies.at(-1).includes("InputValidationError"), "the model never saw Claude Code's rejection");
+	s.returnResults(message);
+	assert.equal((await s.call()).stopReason, "stop");
+	assert.ok((await s.nextPrompt()).includes(s.resultText), "pi's result for the retry is missing from the next request");
 });
 
 it("a served name in the wrong case never reaches pi, and the retry under the exact name does", { timeout: 60_000 }, async () => {
