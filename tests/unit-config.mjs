@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, globalConfigPath, loadConfig, removedAskClaudeNotice } from "../src/config.js";
+import { claudeCodeSettings, globalConfigPath, loadConfig, removedAskClaudeNotice, systemPromptPresetEnabled } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -33,7 +33,44 @@ describe("claudeCodeSettings", () => {
 	});
 });
 
+describe("systemPromptPresetEnabled", () => {
+	it("is on by default and with true (or upstream's \"claude_code\")", () => {
+		assert.equal(systemPromptPresetEnabled(), true);
+		assert.equal(systemPromptPresetEnabled({}), true);
+		assert.equal(systemPromptPresetEnabled({ systemPromptPreset: true }), true);
+		assert.equal(systemPromptPresetEnabled({ systemPromptPreset: "claude_code" }), true);
+	});
+
+	it("is off with false (or upstream's null)", () => {
+		assert.equal(systemPromptPresetEnabled({ systemPromptPreset: false }), false);
+		assert.equal(systemPromptPresetEnabled({ systemPromptPreset: null }), false);
+	});
+});
+
 describe("loadConfig", () => {
+	it("reads systemPromptPreset from the global config", () => withTempHome(() => {
+		mkdirSync(getAgentDir(), { recursive: true });
+		writeFileSync(join(getAgentDir(), "claude-bridge.json"), JSON.stringify({ provider: { systemPromptPreset: false } }));
+		assert.equal(systemPromptPresetEnabled(loadConfig().provider), false);
+	}));
+
+	it("ignores an invalid systemPromptPreset, keeping the preset on, instead of failing to start", () => withTempHome(() => {
+		mkdirSync(getAgentDir(), { recursive: true });
+		const originalError = console.error;
+		const errors = [];
+		console.error = (...args) => errors.push(args.join(" "));
+		try {
+			for (const value of ["other", 0, "false"]) {
+				errors.length = 0;
+				writeFileSync(join(getAgentDir(), "claude-bridge.json"), JSON.stringify({ provider: { plan: "max", systemPromptPreset: value } }));
+				assert.deepEqual(loadConfig(), { provider: { plan: "max" } }, `${JSON.stringify(value)} is dropped`);
+				assert.match(errors.join("\n"), /systemPromptPreset/, `${JSON.stringify(value)} is reported`);
+			}
+		} finally {
+			console.error = originalError;
+		}
+	}));
+
 	it("ignores a project's provider config", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {

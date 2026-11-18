@@ -1,15 +1,10 @@
-// Replay-order contract for toBridgeContext (issues #106 + terra review must-fix).
+// Replay-order contract for toBridgeContext (issue #106).
 //
-// The bridge's prompt-capture registry records ctx.getSystemPrompt(), which pi renders
-// from the canonical section builder (preamble, tools, rules, docs, addendum,
-// project_context, skills, cwd, then customs). The transcript replays section patches
-// in Map order, where a deleted-then-re-added section (skills vanishes while `read` and
-// `bash` are both disabled, then returns) or a mid-session first appearance (skills
-// becomes loadable) lands at the tail instead of its canonical slot. Re-emitting in
-// canonical order keeps the replayed prompt byte-identical to the recorded key, so the
-// exact-match lookup never spuriously throws. A name pi does not rank — an extension's
-// custom section such as `mcp_servers`, or a future pi built-in — sorts after `cwd`, where
-// pi's builder puts every custom section.
+// The transcript replays section patches in Map order: a deleted-then-re-added section
+// (skills vanishes while `read` and `bash` are both disabled, then returns) or a late
+// custom section such as `mcp_servers` lands at the tail. The bridge forwards pi-ai's own
+// join of that state (getSystemMessageText), in replay order, with no re-ranking: it is
+// the prompt pi itself would send another provider.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -38,8 +33,8 @@ const SKILLS_REORDERED = [
 	userMessage("go"),
 ];
 
-/** A section pi does not rank today (say a future `environment`) present from the first
- *  patch, where the replay would put it before `cwd`. */
+/** A section pi does not know today (say a future `environment`) present from the first
+ *  patch, before `cwd`. */
 const UNKNOWN_SECTION_CANONICAL = [
 	systemMessage({ content: "", toolsAdded: [{ name: "read", description: "", parameters: {} }] }),
 	systemMessage({
@@ -51,8 +46,7 @@ const UNKNOWN_SECTION_CANONICAL = [
 /** The issue #153 shape: the built-ins (including `cwd`) are in the replay Map from the
  *  first patch, and a later patch introduces `mcp_servers` — the section pi's MCP extension
  *  adds once its servers connect — alongside an `addendum` that the first render did not
- *  have. Ranking unlisted names after the built-ins is what keeps `mcp_servers` from
- *  inheriting `addendum`'s rank and jumping ahead of `cwd`. */
+ *  have. */
 const MCP_SECTION_LATE = [
 	systemMessage({ content: "", toolsAdded: [{ name: "read", description: "", parameters: {} }] }),
 	systemMessage({
@@ -71,23 +65,19 @@ function replayedSystemPrompt(messages) {
 }
 
 describe("toBridgeContext section replay order", () => {
-	it("re-emits sections in canonical order after a delete-then-re-add reorders the Map", () => {
+	it("keeps a deleted-then-re-added section where the replay puts it", () => {
 		// Map replay order after the skills re-add: preamble, tools, rules, docs, cwd, skills.
-		// Canonical order puts skills before cwd. Byte-equality with the canonical render is
-		// what lets the prompt-capture exact-key lookup match.
-		assert.equal(replayedSystemPrompt(SKILLS_REORDERED), ["P", "T", "R", "D", "S", "/w"].join("\n\n"));
+		assert.equal(replayedSystemPrompt(SKILLS_REORDERED), ["P", "T", "R", "D", "/w", "S"].join("\n\n"));
 	});
 
-	it("ranks a section pi does not know about after cwd", () => {
-		assert.equal(replayedSystemPrompt(UNKNOWN_SECTION_CANONICAL), ["P", "T", "R", "D", "/w", "E"].join("\n\n"));
+	it("keeps a section pi does not know about where the patch put it", () => {
+		assert.equal(replayedSystemPrompt(UNKNOWN_SECTION_CANONICAL), ["P", "T", "R", "D", "E", "/w"].join("\n\n"));
 	});
 
-	it("puts a late-introduced custom section after cwd, matching pi's builder order", () => {
-		// pi's buildSystemPrompt renders: preamble, tools, rules, docs, addendum,
-		// project_context, skills, cwd, then every custom section.
+	it("appends late-introduced sections in replay order", () => {
 		assert.equal(
 			replayedSystemPrompt(MCP_SECTION_LATE),
-			["P", "T", "R", "D", "A", "C", "S", "/w", "M"].join("\n\n"),
+			["P", "T", "R", "D", "C", "S", "/w", "A", "M"].join("\n\n"),
 		);
 	});
 
