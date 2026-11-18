@@ -55,8 +55,11 @@ const flagSettings = [];
 let flagDelayMs = 0;
 let release;
 let release2;
+let release3;
 /** A query that makes a second tool call after the first result. */
 let secondTool = false;
+/** With secondTool, a query that makes a third tool call after the second result. */
+let thirdTool = false;
 /** The continuation pauses this long after its message_start (a slow first token). */
 let pauseAfterStartMs = 0;
 let setModelFails = false;
@@ -73,6 +76,7 @@ beforeEach(() => {
 	setModelFails = false;
 	setModelDelayMs = 5;
 	secondTool = false;
+	thirdTool = false;
 	pauseAfterStartMs = 0;
 	mod.__test.setSwitchModelWaitMs(null);
 	resultsAtSwitch.length = 0;
@@ -80,7 +84,9 @@ beforeEach(() => {
 		started.push(options.extraArgs?.model ?? options.model);
 		const gate = new Promise((r) => { release = r; });
 		const gate2 = new Promise((r) => { release2 = r; });
+		const gate3 = new Promise((r) => { release3 = r; });
 		const twice = secondTool;
+		const thrice = thirdTool;
 		let onClose;
 		const killed = new Promise((r) => { onClose = () => r("killed"); });
 		const fresh = started.length === 1;
@@ -93,6 +99,10 @@ beforeEach(() => {
 				if (twice) {
 					for (const step of toolUse) yield JSON.parse(JSON.stringify(step).replaceAll("toolu_1", "toolu_2").replaceAll("msg_tool", "msg_tool_2"));
 					if (await Promise.race([gate2, killed]) === "killed") return;
+					if (thrice) {
+						for (const step of toolUse) yield JSON.parse(JSON.stringify(step).replaceAll("toolu_1", "toolu_3").replaceAll("msg_tool", "msg_tool_3"));
+						if (await Promise.race([gate3, killed]) === "killed") return;
+					}
 				}
 				const [start, ...rest] = answer("continued");
 				yield start;
@@ -252,6 +262,35 @@ it("does not try a refused switch again at the next tool result of the same quer
 	assert.equal(started.length, 2, "the next prompt opened a fresh query");
 	assert.match(started[1], escape(second.id), "on the requested model");
 	assert.equal(next.model, second.id);
+});
+
+it("remembers every model refused in the query: one refused earlier is not tried again after another refusal", async () => {
+	setModelFails = true;
+	secondTool = true;
+	thirdTool = true;
+	const [a, b, c] = [byId("claude-fable-5-2"), byId("claude-fable-5-1"), byId("claude-fable-5")];
+	assert.ok(a && b && c, "the provider registers the three Fable models");
+	const opts = { sessionId: "pi-refused-two", reasoning: "high", signal: new AbortController().signal };
+	const ask = user("read a");
+	const parked = await streamSimple(a, { messages: [ask], tools }, opts).result();
+	const toB = streamSimple(b, { messages: [ask, parked, toolResult], tools }, opts);
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parked2 = await toB.result();
+	const toC = streamSimple(c, { messages: [ask, parked, toolResult, parked2, secondResult], tools }, opts);
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
+	release2();
+	const parked3 = await toC.result();
+	assert.equal(parked3.stopReason, "toolUse", "the query went on to a third tool call");
+	assert.equal(setModels.length, 2, "both switches were attempted");
+	const thirdResult = { role: "toolResult", toolCallId: "toolu_3", toolName: "read", content: [{ type: "text", text: "MARKER_3" }], isError: false, timestamp: clock++ };
+	const backToB = streamSimple(b, { messages: [ask, parked, toolResult, parked2, secondResult, parked3, thirdResult], tools }, opts);
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_3"); i++) await new Promise((r) => setTimeout(r, 5));
+	release3();
+	const continued = await backToB.result();
+	assert.equal(setModels.length, 2, "the model refused first was not tried again");
+	assert.equal(continued.content.find((blk) => blk.type === "text")?.text, "continued");
+	assert.equal(continued.model, a.id, "labeled with the model that served it");
 });
 
 it("a switch landing while the query is parked on a later tool call does not relabel the message pi recorded", async () => {

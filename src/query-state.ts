@@ -99,9 +99,10 @@ export class QueryContext {
 	/** The model of the latest switch sent to this query and not yet settled: the model
 	 *  CC will serve once it lands, so the next boundary compares against it. */
 	switchingTo: Model<any> | null = null;
-	/** The Claude Code model id this query refused to switch to: not tried again in this
-	 *  query, so a turn of many tool calls makes one failed switch, not one per call. */
-	refusedModel: string | null = null;
+	/** The Claude Code model ids this query refused to switch to: none is tried again in
+	 *  this query, so a turn of many tool calls makes one failed switch per model, not one
+	 *  per call. */
+	refusedModels = new Set<string>();
 	/** The thinking config this query was started with, serialized. Claude Code keeps
 	 *  it for the whole query: setMaxThinkingTokens does not reach a turn under way. */
 	startThinking = "null";
