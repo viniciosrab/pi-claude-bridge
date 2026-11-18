@@ -2215,7 +2215,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// handlers. Results that arrive before their handler get queued in pendingResults.
 	if (resultCtx) {
 		claimCurrentPiStream(stream, "tool-result", resultCtx, options);
-		resultCtx.resetTurnState(model);
+		// The running query answers on the model it was started with: pi switching
+		// models here takes effect at the next prompt, which opens a fresh query.
+		const served = resultCtx.servedModel ?? model;
+		if (served.id !== model.id) debug(`provider: ${model.id} requested at a tool result, query continues on ${served.id} until the next prompt`);
+		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
 		// though markRebuildForSession usually reaches it directly.
@@ -2312,6 +2316,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// query's stdin, not just mismatching a map.
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
+	queryCtx.servedModel = model;
 	queryCtx.latestCursor = 0;
 	latestSent.delete(queryCtx); // fork: reopen resume
 	// The served pi session, for rewrite attribution on delivery (issue #101
