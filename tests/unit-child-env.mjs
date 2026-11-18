@@ -49,6 +49,15 @@ describe("Claude Code child environment", () => {
 		assert.equal(parent.CLAUDECODE, "parent");
 	});
 
+	it("never passes an inherited interrupted-turn resume on to the child (upstream #274)", () => {
+		// Only a continuation query sets these, for itself: one inherited from pi's
+		// environment would make every query resume an interrupted turn.
+		const env = __test.ccChildEnv({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", CLAUDE_CODE_RESUME_PROMPT: "inherited", CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "0" });
+		assert.ok(!("CLAUDE_CODE_RESUME_INTERRUPTED_TURN" in env));
+		assert.ok(!("CLAUDE_CODE_RESUME_PROMPT" in env));
+		assert.equal(env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS, "1");
+	});
+
 	it("does not set the non-essential-traffic flag on pi's own process", () => {
 		const saved = process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 		delete process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;

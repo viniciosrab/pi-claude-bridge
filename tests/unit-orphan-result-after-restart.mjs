@@ -62,6 +62,18 @@ const toolCall = (id) => ({ role: "assistant", content: [{ type: "toolCall", id,
 const toolResult = (id) => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text: "file" }], isError: false, timestamp: clock++ });
 const settle = () => new Promise((r) => setTimeout(r, 20));
 const replyText = (message) => message.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+const CONTINUE_AFTER_RESUME = "[Your session was interrupted and resumed. What precedes this ends with the tool result "
+	+ "you were waiting for. Continue the task from there.]";
+const CONTINUE_AFTER_REWRITE = "[Your context was compacted. What precedes this is a summary plus the most recent messages, "
+	+ "ending with the tool result you were waiting for. Continue the task from there.]";
+/** A continuation reaches Claude Code as its own interrupted-turn resume (upstream #274):
+ *  the continue text in the child's environment, nothing written on stdin. */
+const assertPromptlessContinuation = (call, text) => {
+	assert.equal(call.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN, "1");
+	assert.equal(call.env.CLAUDE_CODE_RESUME_PROMPT, text);
+	assert.equal(call.env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS, "0");
+	assert.deepEqual(call.stdin, [], "nothing is written on stdin");
+};
 
 beforeEach(() => {
 	resetSharedSession();
@@ -71,13 +83,19 @@ beforeEach(() => {
 	setQuery(({ prompt, options }) => {
 		const script = scripts.shift();
 		if (!script) throw new Error("no fake script queued");
-		const call = { label: script.label, resume: options.resume };
+		const call = { label: script.label, resume: options.resume, env: options.env, stdin: [] };
 		calls.push(call);
 		// close() is how the bridge kills CC on abort; it ends a parked script.
 		let closed = false, onClose;
 		const killed = new Promise((r) => { onClose = r; });
+		// Read stdin as CC does, without blocking the turn on it: a continuation
+		// writes nothing there, and CC runs the turn off its own session file.
+		void (async () => {
+			try {
+				for await (const m of prompt) call.stdin.push(m.message.content[0].text);
+			} catch {}
+		})();
 		const gen = (async function* () {
-			call.prompt = (await prompt[Symbol.asyncIterator]().next()).value.message.content[0].text;
 			for (const step of script.steps) {
 				if (closed) return;
 				if (typeof step === "function") { await step(killed); continue; }
@@ -101,7 +119,7 @@ describe("tool result with no parked query", () => {
 			{ sessionId: "pi-restarted" }).result();
 
 		assert.equal(calls.length, 1, "the result carries the turn into a fresh query");
-		assert.match(calls[0].prompt, /interrupted and resumed/);
+		assertPromptlessContinuation(calls[0], CONTINUE_AFTER_RESUME);
 		assert.equal(replyText(reply), "answer after restart");
 	});
 
@@ -114,7 +132,7 @@ describe("tool result with no parked query", () => {
 			{ sessionId: "pi-compacted" }).result();
 
 		assert.equal(calls.length, 1);
-		assert.match(calls[0].prompt, /context was compacted/);
+		assertPromptlessContinuation(calls[0], CONTINUE_AFTER_REWRITE);
 	});
 
 	it("after an abort, ends the turn without a query", async () => {

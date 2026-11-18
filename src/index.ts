@@ -54,7 +54,10 @@ const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 //   a tool result (after a terminating tool, or a discarded parked query) reads to CC
 //   as an interrupted turn, and behind a server flag CC inserts a "Continue from where
 //   you left off." user message ahead of pi's prompt. pi supplies every prompt, so
-//   every turn counts as too old to resume.
+//   every turn counts as too old to resume. The one exception is a continuation
+//   query (a pi turn going on at a tool result with no parked query): its own env
+//   overrides this with CC's interrupted-turn resume (continuationEnv), and
+//   ccChildEnv drops the two resume variables if pi's environment carries them.
 // - CLAUDE_CODE_SILENT_TURN_REMINDER=0: on some models CC adds "The user hasn't heard
 //   from you in a while..." after several assistant messages with no visible text.
 //   pi decides what the model is told; the message is not in pi's history and the
@@ -86,7 +89,27 @@ const PARENT_SESSION_VARS = [
 function ccChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...parent };
 	if (parent.CLAUDECODE) for (const name of PARENT_SESSION_VARS) delete env[name];
+	// Only a continuation query resumes an interrupted turn, and only by its own env.
+	delete env.CLAUDE_CODE_RESUME_INTERRUPTED_TURN;
+	delete env.CLAUDE_CODE_RESUME_PROMPT;
 	return { ...env, ...CC_CHILD_ENV };
+}
+
+// The child env of a continuation query (upstream #274): a pi turn that goes on at a
+// tool result with no query parked on it. Written on stdin, the continue text would
+// follow the tool result as a second user message in a row, and CC inserts its
+// <synthetic> "No response requested." between them, which the model sometimes takes as
+// its finished answer. Instead CC resumes the turn itself, from a session file that
+// ends at the tool result, recording `text` as a meta user record; nothing is read
+// from stdin. MAX_AGE_MS=0 lifts the age bound CC_CHILD_ENV sets. Pinned against the
+// installed CC in tests/int-cc-contracts.mjs.
+function continuationEnv(text: string): NodeJS.ProcessEnv {
+	return {
+		...ccChildEnv(),
+		CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1",
+		CLAUDE_CODE_RESUME_PROMPT: text,
+		CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "0",
+	};
 }
 
 // Pi owns context files on the provider path, so Claude Code must not load its
@@ -788,6 +811,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	piSessionId?: string | null,
 	isReentrant = true,
 	promptDigest?: string,
+	continuation = false,
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -812,6 +836,14 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	}
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
+	// A continuation (upstream #274) has CC resume its turn from the file it is handed,
+	// so that file must end at the tool result: never CC's own file after an abort or an
+	// error result, nor a REUSE, which can hold records past it. It rebuilds.
+	if (continuation && sharedSession && !sharedSession.needsRebuild) {
+		debug(`sync: continuation at a tool result, rebuilding session ${sharedSession.sessionId.slice(0, 8)} from pi's history`);
+		sharedSession.needsRebuild = true;
+		if (piSessionId) dropMirror(piSessionId);
+	}
 	const forkRetry = retryAfterError(sharedSession, priorMessages.length, history.length, abortedTurnAtStart(extractUserPromptBlocks(messages), extractUserPrompt(messages) ?? "", null, cwd).prompt, cwd); // fork: error resume
 	if (forkRetry) return { ...resumeAfterAbort(piSessionId, sharedSession!, priorMessages.length, cwd), resumeSessionAt: forkRetry }; // fork: error resume
 	const forkAbort = postAbortSync(sharedSession, priorMessages, cwd); // fork: abort resume
@@ -1706,6 +1738,20 @@ function failRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; 
 	}
 }
 
+/** Whether `message` shows Claude Code working on the turn: model output, the turn's
+ *  end, an API retry, or a request or compaction under way (status "requesting",
+ *  which CC 2.1.327 emits right before the API call of the turn it resumes, so a slow
+ *  first response is not taken for a silent CC), or the session running. Init, hooks
+ *  and an idle state come before CC has decided whether there is a turn to run at all. */
+function showsTurnWork(message: SDKMessage): boolean {
+	if (message.type === "stream_event" || message.type === "assistant" || message.type === "result") return true;
+	if (message.type !== "system") return false;
+	const m = message as { subtype?: string; status?: unknown; state?: unknown };
+	return m.subtype === "api_retry"
+		|| (m.subtype === "status" && (m.status === "requesting" || m.status === "compacting"))
+		|| (m.subtype === "session_state_changed" && m.state === "running");
+}
+
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
  *  Runs until the query ends. Per turn, the SDK yields stream_events (deltas), then
  *  an assistant message (completed blocks). On tool_use, the stream is ended by
@@ -1729,6 +1775,12 @@ async function consumeQuery(
 		const recordStreamPath = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 		if (recordStreamPath) appendFileSync(recordStreamPath, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
+		// A continuation's fallback waits for this (upstream #274). Only this context's live
+		// query marks it: a discarded one still flushing must not disarm its replacement's.
+		if (!queryCtx.sawTurnWork && queryCtx.activeQuery === sdkQuery && showsTurnWork(message)) {
+			queryCtx.sawTurnWork = true;
+			queryCtx.clearContinuationFallback();
+		}
 		// Checked before the stream guard: pi may be running the rejected call, with
 		// no stream open. The discarded query's completion leaves everything alone.
 		const rejection = toolCallRejection(message, queryCtx);
@@ -2103,6 +2155,7 @@ function discardQuery(c: QueryContext, reason: string): void {
 	// contextForToolResults only matches ids against contexts still in it.
 	activeQueryContexts.delete(c);
 	c.turnToolCallIds = [];
+	c.clearContinuationFallback();
 	c.promptStream?.fail(new Error("query discarded"));
 	c.promptStream = null;
 	// Settle the parked handlers before killing the CLI, for drainForAbort's
@@ -2305,6 +2358,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// The Extra Usage warning is once per query: a fresh query on a reused
 	// top-level context warns again (tool-result continuations share it).
 	queryCtx.warnedUnplannedOverage = false;
+	// Per query: a continuation's fallback waits for this query's first sign of work.
+	queryCtx.sawTurnWork = false;
 	queryCtx.pendingToolCalls.clear();
 	queryCtx.pendingResults.clear();
 	queryCtx.pendingSteerUuids.clear();
@@ -2343,7 +2398,28 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// background subagent holding the top-level context) writes another CC file, so
 	// it must not send this session's rewritten history down the subagent path.
 	const sessionReentrant = [...activeQueryContexts].some((c) => c !== queryCtx && c.activeQuery !== null && sessionKey(c.piSessionId) === sessionKey(piSessionId));
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant, promptDigest);
+	const promptBlocks = extractUserPromptBlocks(context.messages);
+	let promptText = extractUserPrompt(context.messages) ?? "";
+
+	// A turn continuing past a rewrite, or at a tool result no query of this process
+	// was parked on (a restart, a crash, a stall), ends at its tool result, not at a
+	// prompt, so say what happened rather than falling into the empty-prompt recovery
+	// below — that one is for a shape we do not expect, and this is one we do.
+	const atToolResult = lastMsg?.role === "toolResult" && !promptText && !promptBlocks;
+	const continuationText = atToolResult && historyRewritten ? CONTINUE_AFTER_REWRITE_PROMPT
+		: atToolResult && unparkedToolResult ? CONTINUE_AFTER_RESUME_PROMPT
+		: null;
+	if (continuationText) {
+		promptText = continuationText;
+		debug(historyRewritten
+			? `provider: continuing the turn after a rewritten history, ${context.messages.length} msgs rebuilt`
+			: `provider: resuming the turn at a tool result with no parked query, ${context.messages.length} msgs`);
+	}
+	// Claude Code resumes the turn itself, with nothing on stdin (upstream #274), over a
+	// file the sync rebuilds to end at the tool result. Not for a query reentrant on the
+	// session: its sync must not rebuild the owner's file, so it writes the prompt.
+	let continuation = continuationText !== null && !sessionReentrant;
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant, promptDigest, continuation);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
@@ -2353,22 +2429,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// reentrant query must not overwrite the owner's); a fresh or rebuilt one records
 	// this query's. Completion and an abort write it back.
 	queryCtx.promptDigest = resumeSessionId ? sessionStateFor(piSessionId)?.promptDigest : promptDigest;
-	const promptBlocks = extractUserPromptBlocks(context.messages);
-	let promptText = extractUserPrompt(context.messages) ?? "";
-
-	// A turn continuing past a rewrite ends at its tool result, not at a
-	// prompt, so say what happened rather than falling into the empty-prompt
-	// recovery below — that one is for a shape we do not expect, and this is one
-	// we do. The rebuilt session already ends with the tool result, placed after
-	// the tool call it answers.
-	if (historyRewritten && !promptText && !promptBlocks) {
-		promptText = CONTINUE_AFTER_REWRITE_PROMPT;
-		debug(`provider: continuing the turn after a rewritten history, ${context.messages.length} msgs rebuilt`);
-	}
-	if (unparkedToolResult && !promptText && !promptBlocks) {
-		promptText = CONTINUE_AFTER_RESUME_PROMPT;
-		debug(`provider: resuming the turn at a tool result with no parked query, ${context.messages.length} msgs`);
-	}
+	// With no session to resume there is no turn for CC to resume: write the prompt.
+	if (continuation && !resumeSessionId) continuation = false;
 
 	// Guard: empty prompt means the last context message isn't a user message.
 	// This should never happen with per-query state — dump diagnostics if it does.
@@ -2391,10 +2453,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// that `isSingleUserTurn` is false, so the SDK no longer closes stdin on the
 	// first result — consumeQuery ends the stream explicitly instead, or the
 	// query would never terminate.
+	// A continuation writes nothing (upstream #274); its prompt is still the one an
+	// abort or error mark looks for, since CC records it as a meta user record.
 	const abortedTurn = abortedTurnAtStart(promptBlocks, promptText, resumeSessionId, cwd); // fork: abort resume
 	const promptStream = makePromptStream();
-	void promptStream.push(userMessage(promptBlocks ?? [{ type: "text", text: promptText }]))
-		.catch((error) => debug(`provider: initial prompt push rejected:`, error));
+	const pushPrompt = (what: string) => void promptStream.push(userMessage(promptBlocks ?? [{ type: "text", text: promptText }]))
+		.catch((error) => debug(`provider: ${what} push rejected:`, error));
+	if (!continuation) pushPrompt("initial prompt");
 	queryCtx.promptStream = promptStream;
 	const mcpServers = buildMcpServers(mcpTools, queryCtx);
 
@@ -2425,7 +2490,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = ccChildEnv();
+	const childEnv = continuation ? continuationEnv(promptText) : ccChildEnv();
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -2469,10 +2534,12 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
 		`promptChars=${systemPromptText?.length ?? 0} preset=${usePreset} strictMcp=${strictMcpConfigEnabled}`,
-		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
+		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}${continuation ? " [resume env, no stdin]" : ""}`);
 
 	// 3. Start SDK query and claim it for this context
 	let wasAborted = false;
+	// A continuation's fallback (armed below), disarmed on abort and when the query ends.
+	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
 	queryCtx.activeQuery = sdkQuery;
 	queryCtx.aborting = false; // the top-level context is reused across queries
@@ -2490,10 +2557,26 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const onAbort = () => {
 		if (wasAborted) return;
 		wasAborted = true;
+		if (fallbackTimer) abortCtx.clearContinuationFallback(fallbackTimer);
 		abortCtx.aborting = true;
 		drainForAbort(abortCtx, promptStream);
 		requestAbort();
 	};
+	// Safety net for a continuation (upstream #274): CC that judged the turn complete
+	// shows nothing and waits on stdin, so after a quiet spell write the old continue
+	// prompt after all, rather than let the turn hang. Only while this is still the
+	// context's live query, not aborted or discarded.
+	if (continuation) {
+		const timer = setTimeout(() => {
+			queryCtx.clearContinuationFallback(timer);
+			if (queryCtx.sawTurnWork || wasAborted || abandonedQueries.has(sdkQuery) || queryCtx.activeQuery !== sdkQuery || queryCtx.promptStream !== promptStream) return;
+			debug(`provider: continuation showed no sign of working on the turn in ${queryCtx.continuationFallbackMs} ms, writing the continue prompt`);
+			pushPrompt("continuation fallback");
+		}, queryCtx.continuationFallbackMs);
+		timer.unref?.();
+		fallbackTimer = timer;
+		queryCtx.continuationFallback = timer;
+	}
 	if (options?.signal) {
 		if (options.signal.aborted) onAbort();
 		else options.signal.addEventListener("abort", onAbort, { once: true });
@@ -2624,6 +2707,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			queryCtx.currentPiStream = null;
 		})
 		.finally(() => {
+			if (fallbackTimer) queryCtx.clearContinuationFallback(fallbackTimer);
 			if (options?.signal) options.signal.removeEventListener("abort", onAbort);
 			unbindRunSignal();
 			if (queryCtx.bindRunSignal === bindRunSignal) queryCtx.bindRunSignal = null;

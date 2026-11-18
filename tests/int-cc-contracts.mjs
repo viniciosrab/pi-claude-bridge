@@ -862,6 +862,87 @@ test("CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS=1 stops CC resuming a turn 
 	}
 });
 
+test("a turn that ends at a tool result continues with no prompt on stdin, via CC's own interrupted-turn resume (upstream #274)", { timeout: 180_000 }, async () => {
+	// src/index.ts continues a pi turn whose history ends at a tool result (a rewrite
+	// discarded the parked query, or a restart left none). Written as a new user
+	// message, the continue text follows the tool result, so CC sees two user
+	// records in a row and inserts its <synthetic> assistant "No response requested."
+	// between them, which the model sometimes reads as its own finished answer.
+	// CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1 with CLAUDE_CODE_RESUME_PROMPT and the
+	// MAX_AGE_MS bound lifted makes CC continue the turn itself, with the continue
+	// text as a meta user record and nothing read from stdin.
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-continue-contract-"));
+	const sessionIds = [];
+	const SYNTHETIC = "No response requested.";
+	const NATIVE = "Continue from where you left off.";
+	const atToolResult = () => {
+		const session = createSession({ projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR, model: MODEL });
+		sessionIds.push(session.sessionId);
+		session.importMessages([
+			{ role: "user", content: "Read the marker." },
+			{ role: "assistant", content: [{ type: "tool_use", id: "toolu_marker_1", name: "mcp__custom-tools__marker", input: {} }] },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_marker_1", content: "MARKER_OK" }] },
+		]);
+		session.save();
+		return session;
+	};
+	const records = (session) => readFileSync(session.jsonlPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+		.filter((r) => r.type === "user" || r.type === "assistant");
+	const env = (extra) => ({ ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1", ...extra });
+	try {
+		// Control: the continue text as a stdin prompt, as the bridge sent it before.
+		const control = atToolResult();
+		await collect(query({ prompt: "PI-CONTINUE-PROMPT", options: providerOptions({ cwd, resume: control.sessionId, maxTurns: 1,
+			env: env({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "1" }) }) }));
+		const controlBody = turnRequest(requests, "PI-CONTINUE-PROMPT");
+		assert.ok(controlBody, "the control query never reached the stub API");
+		assert.ok(JSON.stringify(controlBody.messages).includes(SYNTHETIC) || JSON.stringify(records(control)).includes(SYNTHETIC),
+			`CC no longer inserts "${SYNTHETIC}" between a tool result and a prompt; the interrupted-turn continuation may be unnecessary`);
+
+		// The bridge's continuation: no stdin message at all, the input held open the
+		// way the bridge's prompt stream holds it.
+		const continued = atToolResult();
+		let release;
+		const held = new Promise((resolve) => { release = resolve; });
+		async function* noPrompt() { await held; }
+		const q = query({ prompt: noPrompt(), options: providerOptions({ cwd, resume: continued.sessionId, maxTurns: 1, includePartialMessages: true,
+			env: env({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1", CLAUDE_CODE_RESUME_PROMPT: "PI-CONTINUE-META", CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: "0" }) }) });
+		const seen = [];
+		let result = null;
+		const giveUp = setTimeout(release, 60_000);
+		for await (const message of q) {
+			seen.push(message.type === "user" ? { type: "user", isReplay: message.isReplay, isSynthetic: message.isSynthetic, text: JSON.stringify(message.message?.content).slice(0, 120) }
+				: { type: message.type, subtype: message.subtype, status: message.status, event: message.event?.type });
+			if (message.type === "result" && result === null) { result = message; release(); }
+		}
+		clearTimeout(giveUp);
+		assert.ok(result, `CC never ran the interrupted turn without a stdin prompt; saw ${JSON.stringify(seen)}`);
+		const body = turnRequest(requests, "PI-CONTINUE-META");
+		assert.ok(body, "the continued turn's request does not end with CLAUDE_CODE_RESUME_PROMPT's text");
+		const sent = JSON.stringify(body.messages);
+		assert.ok(sent.includes("MARKER_OK"), "the continued request lost the tool result");
+		assert.ok(!sent.includes(SYNTHETIC), `the continued request carries "${SYNTHETIC}"`);
+		assert.ok(!sent.includes(NATIVE), `the continued request carries CC's own "${NATIVE}"`);
+		const written = records(continued);
+		assert.ok(!JSON.stringify(written).includes(SYNTHETIC), `CC wrote "${SYNTHETIC}" into the continued session`);
+		const meta = written.find((r) => r.type === "user" && JSON.stringify(r.message?.content).includes("PI-CONTINUE-META"));
+		assert.ok(meta, "CC did not record the continue text in the session");
+		assert.equal(meta.isMeta, true, "the continue text is no longer a meta record: the bridge's abort and error marks look for it as a plain prompt");
+		assert.equal(written.at(-1).type, "assistant", "the continued turn's answer is not the session's last record");
+		// The bridge's 30 s fallback counts status "requesting" as CC working on the turn, so
+		// a slow first response is not mistaken for a CC that saw no turn to run.
+		const requesting = seen.findIndex((m) => m.type === "system" && m.subtype === "status" && m.status === "requesting");
+		const firstEvent = seen.findIndex((m) => m.type === "stream_event");
+		assert.ok(requesting !== -1 && requesting < firstEvent, `CC no longer reports status "requesting" before the continued turn's first stream event; src/index.ts showsTurnWork relies on it. Saw ${JSON.stringify(seen.filter((m) => m.type !== "stream_event"))}`);
+	} finally {
+		api.close();
+		for (const id of sessionIds) deleteSession(id, cwd, process.env.CLAUDE_CONFIG_DIR);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("MAX_AGE_MS=1 keeps the fork's abort-resume shapes resumable and free of CC's resume prompt", { timeout: 180_000 }, async () => {
 	// fork: abort resume. After an Esc the bridge resumes CC's own file, which ends at
 	// the aborted turn: the prompt plus a partial answer, or a tool call left without a
