@@ -967,8 +967,10 @@ export const __test = {
 // dispatched (real side effects) and, because the retry carries a fresh
 // tool_use id, left the handler for the retry with no result to release it:
 // pi's result arrived keyed to the dead id, and both sides deadlocked.
+// Names match exactly: CC dispatches only the name we serve, so a served name
+// in the wrong case is one of these too.
 function piToolNameFor(name: string, customToolNameToPi: Map<string, string>): string | undefined {
-	return customToolNameToPi.get(name) ?? customToolNameToPi.get(name.toLowerCase());
+	return customToolNameToPi.get(name);
 }
 
 // Renames for Claude Code SDK param names that differ from pi's native names.
@@ -1106,7 +1108,6 @@ function resolveMcpTools(context: Context): {
 		customToolNameToSdk.set(tool.name, sdkName);
 		customToolNameToSdk.set(tool.name.toLowerCase(), sdkName);
 		customToolNameToPi.set(sdkName, tool.name);
-		customToolNameToPi.set(sdkName.toLowerCase(), tool.name);
 	}
 
 	return { mcpTools, customToolNameToSdk, customToolNameToPi };
@@ -1148,6 +1149,7 @@ function toMcpToolDefs(tools: Tool[], queryCtx: QueryContext) {
 		description: tool.description,
 		inputSchema: tool.parameters,
 		handler: async (toolCallId: string) => {
+			queryCtx.dispatchedToolCalls.add(toolCallId);
 			if (queryCtx.pendingResults.has(toolCallId)) {
 				const result = queryCtx.pendingResults.get(toolCallId)!;
 				queryCtx.pendingResults.delete(toolCallId);
@@ -1439,7 +1441,11 @@ function processStreamEvent(
 function endTurnOnToolUse(c: QueryContext): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	c.clearToolUseSettle();
-	for (const block of c.turnOutput.content) if (block.type === "toolCall") c.deliveredToolCallIds.add(block.id);
+	for (const block of c.turnOutput.content) {
+		if (block.type !== "toolCall") continue;
+		c.deliveredToolCallIds.add(block.id);
+		c.deliveredToolCallNames.set(block.id, block.name);
+	}
 	c.turnOutput.stopReason = "toolUse";
 	const stream = c.currentPiStream;
 	stream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
@@ -1626,6 +1632,47 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) settleFallbackToolUse(c, c.currentPiStream);
 }
 
+/** Errors of queries that ended on a tool call Claude Code rejected while pi was
+ *  running it, by pi session. That session's next provider call takes its entry. */
+const rejectedToolCalls = new Map<string | null, { toolCallId: string; error: string }>();
+
+/** Claude Code's own tool_result for a call pi got that never reached our MCP
+ *  handler: CC rejected it (a permission rule, a hook, input that is not JSON).
+ *  Never matches an unserved tool name (pi never gets that id) or what CC writes
+ *  for a dispatched call on interrupt. */
+function toolCallRejection(message: SDKMessage, c: QueryContext): { toolCallId: string; describe: (when: string) => string } | undefined {
+	if (message.type !== "user" || message.parent_tool_use_id !== null || !Array.isArray(message.message.content)) return undefined;
+	const block = message.message.content.find((b) => b.type === "tool_result" && c.turnToolCallIds.includes(b.tool_use_id) && !c.dispatchedToolCalls.has(b.tool_use_id));
+	if (block?.type !== "tool_result") return undefined;
+	const id = block.tool_use_id;
+	const inTurn = c.turnOutput?.content.find((b) => b.type === "toolCall" && b.id === id);
+	const name = (inTurn?.type === "toolCall" ? inTurn.name : undefined) ?? c.deliveredToolCallNames.get(id) ?? id;
+	const reason = typeof block.content === "string" ? block.content : (block.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("");
+	return { toolCallId: id, describe: (when) => `Claude Code rejected pi's tool call "${name}" ${when}. Claude Code said: ${JSON.stringify(reason.trim())}` };
+}
+
+/** End a query whose tool call Claude Code rejected itself. Nothing will ever answer
+ *  the call pi was handed, and CC goes on to retry a tool pi may already be running,
+ *  so the query goes the way failLostToolCall's does: discarded, its parked handlers
+ *  settled, its CLI killed and the session's mirror marked for rebuild — pi's history,
+ *  which holds pi's result rather than CC's rejection, is what the next turn imports.
+ *  A stream pi is waiting on fails with the reason; when pi is still running the call,
+ *  its next provider call carrying that result fails instead (rejectedToolCalls). */
+function failRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; describe: (when: string) => string }): void {
+	const running = !c.currentPiStream;
+	const beforePi = !running && c.turnBlocks.some((b: any) => b.type === "toolCall" && b.id === rejection.toolCallId);
+	debug(`consumeQuery: Claude Code rejected tool call [${rejection.toolCallId}] ${running ? "while pi runs it" : beforePi ? "before pi got it" : "after pi ran it"}, ending the query`);
+	const error = rejection.describe(running ? "after pi had started running it" : beforePi ? "before pi started running it" : "after pi ran it");
+	if (running) rejectedToolCalls.set(c.piSessionId, { toolCallId: rejection.toolCallId, error });
+	c.clearToolUseSettle();
+	discardQuery(c, `Claude Code rejected tool call ${rejection.toolCallId}; the turn was ended.`);
+	if (c.currentPiStream && c.turnOutput) {
+		c.turnOutput.stopReason = "error";
+		c.turnOutput.errorMessage = error;
+		finalizeCurrentStream(c);
+	}
+}
+
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
  *  Runs until the query ends. Per turn, the SDK yields stream_events (deltas), then
  *  an assistant message (completed blocks). On tool_use, the stream is ended by
@@ -1649,6 +1696,13 @@ async function consumeQuery(
 		const recordStreamPath = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 		if (recordStreamPath) appendFileSync(recordStreamPath, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
+		// Checked before the stream guard: pi may be running the rejected call, with
+		// no stream open. The discarded query's completion leaves everything alone.
+		const rejection = toolCallRejection(message, queryCtx);
+		if (rejection) {
+			failRejectedToolCall(queryCtx, rejection);
+			return { capturedSessionId };
+		}
 		await reportHeldRateLimit(queryCtx, model);
 		// Everything below the currentPiStream guard is content, which there is
 		// nowhere to put once a turn has ended on a tool call. Handle lifecycle
@@ -2073,6 +2127,21 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
 
+	// The result of a call Claude Code rejected while pi ran it ends the turn with
+	// that error. Taken on every call, so it never outlives this one.
+	const rejected = rejectedToolCalls.get(options?.sessionId ?? null);
+	rejectedToolCalls.delete(options?.sessionId ?? null);
+	if (rejected && extractAllToolResults(context).some((r) => r.toolCallId === rejected.toolCallId)) {
+		debug(`provider: tool result for [${rejected.toolCallId}], which Claude Code rejected, ends the turn`);
+		const output = newAssistantOutput(model, "", "error", rejected.error);
+		queueMicrotask(() => {
+			stream.push({ type: "error", reason: "error", error: output });
+			markStreamComplete(stream);
+			stream.end();
+		});
+		return stream;
+	}
+
 	let activeQuery = ctx().activeQuery !== null;
 	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
 	let resultCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
@@ -2220,6 +2289,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.pendingResults.clear();
 	queryCtx.pendingSteerUuids.clear();
 	queryCtx.deliveredToolCallIds.clear();
+	queryCtx.deliveredToolCallNames.clear();
+	queryCtx.dispatchedToolCalls.clear();
 	// Stale ids would let a late result from the previous query route here via
 	// contextForToolResults — which now means pushing its steer into this
 	// query's stdin, not just mismatching a map.
@@ -2673,6 +2744,8 @@ export default function (pi: ExtensionAPI) {
 	// agent_start also captures a handler-returned forceSystemPrompt, which
 	// buildSystemPrompt renders verbatim.
 	pi.on("agent_start", (_event, ctx) => {
+		// A terminating tool can end the previous run without consuming its rejection.
+		rejectedToolCalls.delete(ctx?.sessionManager?.getSessionId?.() ?? null);
 		const systemPrompt = ctx.getSystemPrompt();
 		recordSystemPrompt("agent_start", systemPrompt, lastSystemPromptOptions);
 		persistForOtherProcesses(ctx, systemPrompt);

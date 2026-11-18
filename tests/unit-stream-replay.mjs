@@ -42,7 +42,16 @@ async function replay(name, { toolNames = ["read"] } = {}) {
 	const customToolNameToPi = new Map(toolNames.map((n) => [`mcp__custom-tools__${n}`, n]));
 
 	const messages = fixture(name);
-	async function* stream() { for (const m of messages) yield m; }
+	async function* stream() {
+		for (const m of messages) {
+			// Live, Claude Code called the MCP handler before writing an accepted call's
+			// result; without that, the result reads as a call Claude Code rejected.
+			if (m.type === "user" && Array.isArray(m.message?.content)) {
+				for (const b of m.message.content) if (b.type === "tool_result") c.dispatchedToolCalls.add(b.tool_use_id);
+			}
+			yield m;
+		}
+	}
 	const { capturedSessionId } = await __test.consumeQuery(stream(), customToolNameToPi, model, () => false, c);
 	return { events, ctx: c, messages, capturedSessionId };
 }
