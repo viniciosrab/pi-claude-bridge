@@ -109,8 +109,7 @@ describe("agent_start capture — documented gaps", () => {
 		const capture = __test.promptCaptures.resolve("forced replacement prompt owning the request head");
 		assert.ok(capture, "the forced text becomes a capture key at agent_start");
 		// Caveat pinned by design: only the portable parts are projected for Claude Code;
-		// the forced text's own novel prose is not forwarded (forwarding pi-harness-shaped
-		// prose would trip the server's third-party gate).
+		// the forced text's own novel prose is not forwarded.
 	});
 
 	it("does not rescue a prompt composed outside the before_agent_start pipeline (#102 shape)", () => {

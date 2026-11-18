@@ -51,5 +51,4 @@ describe("a prompt the bridge refuses", () => {
 		assert.equal(__test.activeQueryContexts.size, 0);
 		assert.ok(existsSync(join(agentDir, "claude-bridge-diag.log")));
 	});
-
 });

@@ -294,7 +294,6 @@ export class PromptCaptures {
 	}
 }
 
-
 const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
 
 /** Isolated agents re-evaluate this module; a process-wide instance lets the pinned
