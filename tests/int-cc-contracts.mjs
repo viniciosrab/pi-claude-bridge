@@ -695,6 +695,46 @@ test("systemPrompt: a resumed session re-sends the prompt it was created with, i
 	}
 });
 
+test("systemPrompt: a session rebuilt in place from imported history sends the new prompt", { timeout: 120_000 }, async () => {
+	// The bridge's answer to the contract above: when the prompt changes it rebuilds
+	// CC's session from pi's history, in place (deleteSession, then createSession with
+	// the same id and an import), as syncSharedSession's REBUILD path does. The
+	// imported file carries no recorded prompt, so CC records and sends the new one.
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-system-prompt-rebuild-"));
+	const oldAppend = `PI-OLD-PROMPT-${randomUUID()}`;
+	const newAppend = `PI-NEW-PROMPT-${randomUUID()}`;
+	const firstPrompt = `Reply OK (first ${randomUUID()}).`;
+	const rebuiltPrompt = `Reply OK (rebuilt ${randomUUID()}).`;
+	const env = { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	const opts = (append, extra = {}) => providerOptions({ cwd, maxTurns: 1, env, systemPrompt: { type: "preset", preset: "claude_code", append }, ...extra });
+	let sessionId;
+	try {
+		const first = await collect(query({ prompt: firstPrompt, options: opts(oldAppend) }));
+		assert.equal(first.result?.subtype, "success");
+		sessionId = first.result.session_id;
+
+		deleteSession(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
+		const session = createSession({ sessionId, projectPath: cwd, claudeDir: process.env.CLAUDE_CONFIG_DIR, model: MODEL });
+		session.importMessages([{ role: "user", content: firstPrompt }, { role: "assistant", content: [{ type: "text", text: "OK" }] }]);
+		session.save();
+
+		const second = await collect(query({ prompt: rebuiltPrompt, options: opts(newAppend, { resume: sessionId }) }));
+		assert.equal(second.result?.subtype, "success");
+		const body = turnRequest(requests, rebuiltPrompt);
+		assert.ok(body, "the rebuilt session's query never reached the stub API");
+		assert.ok(JSON.stringify(body.messages).includes(firstPrompt), "the rebuilt request lost the imported history");
+		const system = systemText(body);
+		assert.ok(system.includes(newAppend), "a rebuilt session did not send the new prompt — rebuilding no longer applies a prompt change");
+		assert.ok(!system.includes(oldAppend), "a rebuilt session still sent the prompt the deleted file recorded");
+	} finally {
+		api.close();
+		if (sessionId) deleteSession(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 // --- The gitStatus cache pinning ---
 
 test("includeGitInstructions:false strips gitStatus and keeps the preset static across git transitions", { timeout: 180_000 }, async () => {

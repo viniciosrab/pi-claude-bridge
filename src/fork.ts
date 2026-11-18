@@ -493,6 +493,9 @@ export interface MirrorRecord {
 	// Of the history the cursor covers, which a reopened history must start with.
 	fingerprint: string;
 	fingerprintLength: number;
+	// The system prompt CC's session was made with (src/index.ts promptDigestFor).
+	// Absent from a mirror an older version wrote: unknown, so the next sync rebuilds.
+	promptDigest?: string;
 	// The process that wrote it: a CC session file never has two live writers.
 	pid: number;
 	// Set when the recorded turn was aborted: the abort mark, and the aborted CLI's
@@ -688,7 +691,7 @@ export function persistedAbortMark(piSessionId: string | undefined): AbortMark |
 /** The CC session a new process may resume for `piSessionId`, or null to rebuild:
  *  nothing recorded, another cwd, CC's file gone, another live process using it,
  *  or a history that no longer starts with the turn CC completed. */
-export function loadMirror(piSessionId: string, history: { role?: string; timestamp?: number }[], cwd: string): { sessionId: string; cursor: number; abort?: AbortMark } | null {
+export function loadMirror(piSessionId: string, history: { role?: string; timestamp?: number }[], cwd: string): { sessionId: string; cursor: number; promptDigest?: string; abort?: AbortMark } | null {
 	const record = readMirror(piSessionId);
 	if (!record) return null;
 	if (record.cwd !== cwd || !existsSync(getSessionPath(record.sessionId, cwd, process.env.CLAUDE_CONFIG_DIR))) return null;
@@ -703,7 +706,7 @@ export function loadMirror(piSessionId: string, history: { role?: string; timest
 	if (history.length === record.cursor && !abort?.errorResult) return null;
 	if (!abort && (history[record.cursor] as { role?: string }).role !== "assistant") return null;
 	if (historyFingerprint(history.slice(0, record.cursor)) !== record.fingerprint) return null;
-	return { sessionId: record.sessionId, cursor: record.cursor, ...(abort ? { abort } : {}) };
+	return { sessionId: record.sessionId, cursor: record.cursor, promptDigest: record.promptDigest, ...(abort ? { abort } : {}) };
 }
 
 // Fork from the parent's CC session. pi's /fork starts a new pi session holding a
@@ -827,11 +830,13 @@ export interface ForkPoint {
 /** The fork point for a pi session forked from `parentPiSessionId` whose history
  *  before its first prompt is `prior`, or null to rebuild: as loadMirror, nothing
  *  recorded, another cwd, CC's file gone or another live process using it, plus an
- *  aborted parent turn; and a `prior` that is not exactly the history some completed
- *  turn of the parent covered followed by that turn's final answer. */
-export function forkPoint(parentPiSessionId: string, prior: { role?: string; timestamp?: number; content?: unknown }[], cwd: string): ForkPoint | null {
+ *  aborted parent turn; a parent session made with another system prompt than
+ *  `promptDigest` (a fork copies its records, and CC re-sends the prompt they record);
+ *  and a `prior` that is not exactly the history some completed turn of the parent
+ *  covered followed by that turn's final answer. */
+export function forkPoint(parentPiSessionId: string, prior: { role?: string; timestamp?: number; content?: unknown }[], cwd: string, promptDigest: string): ForkPoint | null {
 	const record = readMirror(parentPiSessionId);
-	if (!record || record.cwd !== cwd || record.abortedAt !== undefined) return null;
+	if (!record || record.cwd !== cwd || record.abortedAt !== undefined || record.promptDigest !== promptDigest) return null;
 	if (record.pid !== process.pid && processAlive(record.pid)) return null;
 	const cursor = prior.length - 1;
 	const turn = record.turns?.find((t) => t.cursor === cursor);
@@ -849,11 +854,12 @@ export function forkPoint(parentPiSessionId: string, prior: { role?: string; tim
 export function startFromParentFork(
 	streamFn: StreamFn,
 	state: object | null,
-	plant: (state: { sessionId: string; cursor: number; cwd: string }) => void,
+	plant: (state: { sessionId: string; cursor: number; cwd: string; promptDigest: string }) => void,
 	log: (message: string) => void,
 	model: Model<any>,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options: SimpleStreamOptions | undefined,
+	promptDigest: () => string,
 ): AssistantMessageEventStream | undefined {
 	const child = options?.sessionId;
 	if (!child || state || options?.cacheRetention === "none") return undefined;
@@ -865,7 +871,8 @@ export function startFromParentFork(
 	const history = nonSystemMessages(context.messages);
 	let start = history.length;
 	while (start > 0 && history[start - 1].role === "user") start--;
-	const point = forkPoint(parent, history.slice(0, start), cwd);
+	const digest = promptDigest();
+	const point = forkPoint(parent, history.slice(0, start), cwd, digest);
 	if (!point) {
 		log(`fork: pi session ${child.slice(0, 8)} has no fork point in parent ${parent.slice(0, 8)}, rebuilding`);
 		return undefined;
@@ -877,7 +884,7 @@ export function startFromParentFork(
 				removeForkFile(sessionId, point.sessionId);
 				throw new Error(`forked session ${sessionId} not at its session path`);
 			}
-			plant({ sessionId, cursor: point.cursor, cwd });
+			plant({ sessionId, cursor: point.cursor, cwd, promptDigest: digest });
 			log(`fork: pi session ${child.slice(0, 8)} starts from CC session ${sessionId.slice(0, 8)}, forked from ${point.sessionId.slice(0, 8)} at ${point.upToMessageId.slice(0, 8)}, cursor=${point.cursor}`);
 		} catch (error) {
 			log(`fork: forking CC session ${point.sessionId.slice(0, 8)} failed, rebuilding: ${error instanceof Error ? error.message : String(error)}`);

@@ -3,16 +3,20 @@
  * option). By default Claude Code's `claude_code` preset goes first with pi's whole
  * prompt, as pi renders it, as its append; `provider.systemPromptPreset: false` sends
  * pi's prompt alone as a plain string. No prompt capture is consulted, so a prompt
- * nothing recorded (a replaced prompt, a subagent's wrapper) still starts a query, and a
- * prompt that changes between turns resumes the same Claude Code session.
+ * nothing recorded (a replaced prompt, a subagent's wrapper) still starts a query.
+ *
+ * Claude Code re-sends the prompt a session was created with on every resume
+ * (tests/int-cc-contracts.mjs), so a changed prompt, or a changed preset setting,
+ * rebuilds the session from pi's history instead of resuming it.
  *
  * The SDK is stubbed through __test.setQuery: no Claude Code process runs.
  */
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createSession, getSessionPath } from "cc-session-io";
 
 // The config file is read at activation; CLAUDE_BRIDGE_CONFIG lets each test supply its own.
 const tmpRoot = mkdtempSync(join(tmpdir(), "claude-bridge-system-prompt-"));
@@ -112,18 +116,54 @@ describe("system prompt sent to Claude Code", () => {
 		assert.equal(options.systemPrompt.append, buildSystemPrompt(opts));
 	});
 
-	it("a prompt changed on the next turn resumes the same Claude Code session", async () => {
+	// The fake SDK writes no session file: stand in for the CLI writing its own, so a
+	// resume (the file untouched) tells apart from a rebuild (pi's history imported).
+	const sessionFile = (id) => getSessionPath(id, process.cwd(), process.env.CLAUDE_CONFIG_DIR);
+	const ccWritesSession = (id) => {
+		const session = createSession({ sessionId: id, projectPath: process.cwd(), claudeDir: process.env.CLAUDE_CONFIG_DIR });
+		session.importMessages([{ role: "user", content: "written by claude code" }]);
+		session.save();
+	};
+	const resumedOwnFile = (id) => readFileSync(sessionFile(id), "utf8").includes("written by claude code");
+
+	it("an unchanged prompt resumes the same Claude Code session", async () => {
+		activate({});
+		const u1 = user("one");
+		await turn("sp-same", [head({ cwd }), u1]);
+		ccWritesSession("cc-1");
+		const options = await turn("sp-same", [head({ cwd }), u1, say("ok"), user("two")]);
+		assert.equal(options.resume, "cc-1");
+		assert.ok(resumedOwnFile("cc-1"), "CC's own file is resumed, not rebuilt");
+	});
+
+	it("a prompt changed on the next turn rebuilds the session from pi's history", async () => {
 		activate({});
 		const u1 = user("one");
 		await turn("sp-change", [head({ cwd }), u1]);
-		const first = __test.getSharedSession("sp-change");
-		assert.equal(first.sessionId, "cc-1");
+		ccWritesSession("cc-1");
 		const changed = { cwd, appendSystemPrompt: "A new rule from an extension." };
-		const options = await turn("sp-change", [head(changed), u1, say("ok"), user("two")]);
-		assert.equal(launches.length, 2);
-		assert.equal(options.resume, "cc-1", "the changed prompt resumes the session it had");
-		assert.equal(__test.getSharedSession("sp-change").sessionId, "cc-1", "no rebuild into a new session");
+		const a1 = say("ok"), u2 = user("two");
+		const options = await turn("sp-change", [head(changed), u1, a1, u2]);
 		assert.equal(options.systemPrompt.append, buildSystemPrompt(changed), "the new prompt is the one sent");
+		assert.ok(!resumedOwnFile(options.resume), "a resume would re-send the prompt CC recorded: pi's history is imported instead");
+		assert.match(readFileSync(sessionFile(options.resume), "utf8"), /"one"/, "the rebuilt session holds pi's history");
+
+		// The rebuilt session now carries the new prompt: the next turn resumes it.
+		ccWritesSession(options.resume);
+		const next = await turn("sp-change", [head(changed), u1, a1, u2, say("ok"), user("three")]);
+		assert.equal(next.resume, options.resume);
+		assert.ok(resumedOwnFile(next.resume), "an unchanged prompt after the rebuild resumes");
+	});
+
+	it("a changed systemPromptPreset setting rebuilds the session", async () => {
+		activate({});
+		const u1 = user("one");
+		await turn("sp-preset", [head({ cwd }), u1]);
+		ccWritesSession("cc-1");
+		activate({ systemPromptPreset: false });
+		const options = await turn("sp-preset", [head({ cwd }), u1, say("ok"), user("two")]);
+		assert.equal(options.systemPrompt, buildSystemPrompt({ cwd }), "the same text, now without the preset");
+		assert.ok(!resumedOwnFile(options.resume), "the preset change rebuilds rather than resumes");
 	});
 });
 

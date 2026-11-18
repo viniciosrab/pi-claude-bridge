@@ -199,6 +199,21 @@ describe("the turn after an API error result", () => {
 		assert.equal(state.abortedAt, undefined);
 	});
 
+	it("rebuilds instead of cutting back when pi's system prompt changed before the retry", async () => {
+		// CC re-sends the prompt a session was created with on every resume
+		// (tests/int-cc-contracts.mjs): a changed prompt needs pi's history imported.
+		const P = "pi-error-retry-prompt";
+		const u1 = user("first"), u2 = user("long essay");
+		const { a1 } = await completeThenFail(P, u1, u2);
+		pastSettleWindow(P);
+
+		scripts.push({ label: "retry", steps: [init("cc-x"), result("ok")] });
+		await call(P, [{ role: "system", content: "a new rule", timestamp: clock++ }, u1, a1, u2]).result();
+
+		const resumed = rebuilt(P);
+		assert.equal(existsSync(sessionFile(resumed)), true, "the rotated session is rebuilt from pi's history");
+	});
+
 	it("cuts before the records the failed query wrote ahead of its prompt", async () => {
 		const P = "pi-error-retry-attachment";
 		const u1 = user("first"), u2 = user("long essay");

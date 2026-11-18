@@ -6,7 +6,7 @@ import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/res
 import { rememberToolArgs, streamingToolArgs, toolArgsFallback } from "./fork-stream-args.js"; // fork: streaming tool args
 import "./fork-tool-streaming.js"; // fork: eager tool input streaming
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, ErrorResultFailure, errorResultMarkable, retryAfterError, historyFingerprint, loadMirror, mirrorAbortFields, persistedAbortMark, postAbortSync, saveMirror, trackCliProcess, withProviderSettingSources, withStderrTail, withRateLimitNoticeFilter, type AbortedTurn, type AbortMark } from "./fork.js";
 import { dirname, join } from "path";
@@ -217,6 +217,18 @@ interface SessionState {
 	forceRotate?: boolean;
 	abortedAt?: AbortMark["abortedAt"]; abortedPrompt?: AbortMark["abortedPrompt"]; abortedFileOffset?: AbortMark["abortedFileOffset"]; abortedProcess?: AbortMark["abortedProcess"]; // fork: abort resume
 	errorResult?: AbortMark["errorResult"]; // fork: error resume
+	// The system prompt this CC session was made with (promptDigestFor). CC records
+	// a session's prompt on its first run and re-sends it on every --resume, ignoring
+	// the one the resuming query passes (tests/int-cc-contracts.mjs), so a different
+	// digest rebuilds the session from pi's history. Undefined: unknown (a mirror an
+	// older version wrote), which rebuilds too.
+	promptDigest?: string;
+}
+
+/** The system prompt the bridge sends Claude Code, as a digest: the preset setting
+ *  and pi's whole prompt text. Upstream's promptDigest, on the normalized setting. */
+function promptDigestFor(systemPrompt: string | undefined): string {
+	return createHash("sha256").update(JSON.stringify([systemPromptPresetEnabled(providerSettings), systemPrompt ?? ""])).digest("hex");
 }
 
 /**
@@ -775,6 +787,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	modelId?: string,
 	piSessionId?: string | null,
 	isReentrant = true,
+	promptDigest?: string,
 ): SyncResult {
 	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
@@ -785,6 +798,15 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// session's CC file.
 	if (piSessionId && !sessionStateFor(piSessionId)) restoreMirror(piSessionId, nonSystemMessages(messages), cwd); // fork: reopen resume
 	const sharedSession = sessionStateFor(piSessionId);
+	// CC re-sends the prompt a session was made with on every resume, plain, after an
+	// abort or cut back after an error: a different prompt rebuilds from pi's history,
+	// like a rewrite. A rebuild after an abort or error result still rotates (forceRotate).
+	// Without a digest (a direct caller) the prompt is not compared.
+	if (promptDigest !== undefined && sharedSession && !sharedSession.needsRebuild && sharedSession.promptDigest !== promptDigest) {
+		debug(`sync: system prompt changed (${sharedSession.promptDigest?.slice(0, 8) ?? "unknown"} -> ${promptDigest.slice(0, 8)}), rebuilding session ${sharedSession.sessionId.slice(0, 8)} from pi's history`);
+		sharedSession.needsRebuild = true;
+		if (piSessionId) dropMirror(piSessionId);
+	}
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
 	const forkRetry = retryAfterError(sharedSession, priorMessages.length, history.length, abortedTurnAtStart(extractUserPromptBlocks(messages), extractUserPrompt(messages) ?? "", null, cwd).prompt, cwd); // fork: error resume
@@ -883,7 +905,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined });
+	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined, promptDigest });
 	if (piSessionId) dropMirror(piSessionId); // fork: fork cache, the turns recorded for the old file no longer hold
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
@@ -946,6 +968,7 @@ export const __test = {
 	effortForReasoning,
 	thinkingForReasoning,
 	syncSharedSession,
+	promptDigestFor,
 	extractUserPromptBlocks,
 	consumeQuery,
 	finalizeCurrentStream,
@@ -1911,7 +1934,7 @@ async function deliverToolResults(
 function restoreMirror(piSessionId: string, history: Context["messages"], cwd: string): void {
 	const restored = loadMirror(piSessionId, history, cwd);
 	if (!restored) return;
-	setSessionStateFor(piSessionId, { sessionId: restored.sessionId, cursor: restored.cursor, cwd, piSessionId, ...(restored.abort ? { ...restored.abort, forceRotate: true } : {}) });
+	setSessionStateFor(piSessionId, { sessionId: restored.sessionId, cursor: restored.cursor, cwd, piSessionId, promptDigest: restored.promptDigest, ...(restored.abort ? { ...restored.abort, forceRotate: true } : {}) });
 	debug(`reopen: restored session ${restored.sessionId.slice(0, 8)} for pi session ${piSessionId.slice(0, 8)}, cursor=${restored.cursor}${restored.abort ? ", aborted turn" : ""}`);
 }
 
@@ -1929,7 +1952,7 @@ function recordMirror(c: QueryContext, sent: Context["messages"], cwd: string, a
 	const latest = latestSent.get(c);
 	const history = nonSystemMessages(latest && latest.length > sent.length ? latest : sent);
 	if (!state || state.needsRebuild || state.cursor !== history.length) return dropMirror(c.piSessionId);
-	saveMirror(c.piSessionId, { sessionId: state.sessionId, cursor: state.cursor, cwd, fingerprint: historyFingerprint(history), fingerprintLength: history.length, ...(abort ? mirrorAbortFields(abort) : {}) });
+	saveMirror(c.piSessionId, { sessionId: state.sessionId, cursor: state.cursor, cwd, promptDigest: state.promptDigest, fingerprint: historyFingerprint(history), fingerprintLength: history.length, ...(abort ? mirrorAbortFields(abort) : {}) });
 }
 
 /** fork: abort resume. Records an aborted query on its own session's mirror, after
@@ -1955,6 +1978,7 @@ function markAbortedSession(c: QueryContext, prior: SessionState | null, capture
 		piSessionId: c.piSessionId ?? undefined,
 		needsRebuild: c.missedSteer || prior?.needsRebuild,
 		forceRotate: true,
+		promptDigest: c.promptDigest ?? prior?.promptDigest,
 		...mark,
 	});
 	recordMirror(c, sent, cwd, mark);
@@ -2080,7 +2104,7 @@ function failLostToolCall(c: QueryContext, toolCallId: string, toolName: string,
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const afterAbort = deferUntilAbortSettles(streamClaudeAgentSdk, sessionStateFor(options?.sessionId) ?? persistedAbortMark(options?.sessionId), model, context, options); if (afterAbort) return afterAbort; // fork: abort resume
-	const forkStart = startFromParentFork(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), (s) => setSessionStateFor(options?.sessionId, { ...s, piSessionId: options?.sessionId }), debug, model, context, options); if (forkStart) return forkStart; // fork: fork cache
+	const forkStart = startFromParentFork(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), (s) => setSessionStateFor(options?.sessionId, { ...s, piSessionId: options?.sessionId }), debug, model, context, options, () => promptDigestFor(toBridgeContext(context).systemPrompt || undefined)); if (forkStart) return forkStart; // fork: fork cache
 	showRemovedAskClaudeNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every cursor write and syncSharedSession call
@@ -2221,6 +2245,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// is forwarded as it is.
 	const systemPromptText = context.systemPrompt || undefined;
 	const usePreset = systemPromptPresetEnabled(providerSettings);
+	const promptDigest = promptDigestFor(systemPromptText);
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
@@ -2252,6 +2277,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// from the set, not from here) and re-discard a healthy query.
 	queryCtx.historyStale = false;
 	queryCtx.missedSteer = false;
+	queryCtx.promptDigest = promptDigest;
 
 	const cwd = sessionCwdFor(options?.sessionId);
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
@@ -2267,7 +2293,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// background subagent holding the top-level context) writes another CC file, so
 	// it must not send this session's rewritten history down the subagent path.
 	const sessionReentrant = [...activeQueryContexts].some((c) => c !== queryCtx && c.activeQuery !== null && sessionKey(c.piSessionId) === sessionKey(piSessionId));
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant);
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId, sessionReentrant, promptDigest);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
@@ -2491,7 +2517,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, promptDigest: queryCtx.promptDigest ?? state?.promptDigest });
 					recordMirror(queryCtx, context.messages, cwd); // fork: reopen resume
 				}
 			}

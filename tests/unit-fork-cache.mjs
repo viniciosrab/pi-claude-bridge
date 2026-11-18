@@ -176,6 +176,25 @@ describe("a pi session made by /fork", () => {
 		assert.doesNotMatch(text, /cc:/, "a history CC never saw is imported into a new session");
 	});
 
+	it("rebuilds instead of forking when pi's system prompt changed since the parent's turn", async () => {
+		// CC re-sends the prompt a session was created with on every resume, and a fork
+		// copies the parent's records (tests/int-cc-contracts.mjs): a fork would keep
+		// the parent's prompt.
+		const P = "pi-fork-prompt", C = "pi-fork-prompt-child", id = "34343434-3434-4434-8434-343434343434";
+		const { u1, a1, u2, a2 } = await parentWithTwoTurns(P, id);
+		forkTo(P, C);
+		let forkCalls = 0;
+		forkSeams.forkSession = async (...args) => { forkCalls++; return realForkSession(...args); };
+
+		scripts.push({ label: "child turn", steps: [init("cc-x"), result("ok")] });
+		await call(C, [{ role: "system", content: "a new rule", timestamp: clock++ }, u1, a1, u2, a2, user("third")]).result();
+
+		assert.equal(forkCalls, 0, "no fork of a session made with another prompt");
+		const { text } = resumedByChild(id);
+		assert.ok(!forked(text), "pi's history is imported into a new session");
+		assert.doesNotMatch(text, /cc:/);
+	});
+
 	it("rebuilds when the parent's CC session file is gone", async () => {
 		const P = "pi-fork-no-file", C = "pi-fork-no-file-child", id = "44444444-4444-4444-8444-444444444444";
 		const { u1, a1, u2, a2 } = await parentWithTwoTurns(P, id);

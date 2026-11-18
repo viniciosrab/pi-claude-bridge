@@ -149,6 +149,65 @@ describe("a pi session continued in a new process", () => {
 		assert.equal(existsSync(sessionFile(resumed)), true);
 	});
 
+	// Claude Code re-sends the prompt a session was created with on every resume
+	// (tests/int-cc-contracts.mjs), so the mirror records the prompt it was made with.
+	const system = (text) => ({ role: "system", content: text, timestamp: clock++ });
+	const mirrorFile = (P) => join(mirrorDir(), `${P}.json`);
+
+	it("rebuilds when pi's system prompt changed since the session was recorded", async () => {
+		const P = "pi-reopen-prompt";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
+		scripts.push({ label: "turn 1", steps: [init("cc-reopen-prompt"), result("first answer")] });
+		await call(P, [system("the old prompt"), u1]).result();
+		ccWritesSession("cc-reopen-prompt");
+		newProcess();
+
+		scripts.push({ label: "turn 2", steps: [init("cc-x"), result("ok")] });
+		await call(P, [system("the new prompt"), u1, a1, u2]).result();
+
+		const resumed = calls.at(-1).resume;
+		assert.doesNotMatch(readFileSync(sessionFile(resumed), "utf8"), /written by claude code/, "pi's history is imported, so CC records the new prompt");
+	});
+
+	it("resumes across a new process when pi's system prompt is unchanged", async () => {
+		const P = "pi-reopen-same-prompt";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
+		scripts.push({ label: "turn 1", steps: [init("cc-reopen-same-prompt"), result("first answer")] });
+		await call(P, [system("the prompt"), u1]).result();
+		ccWritesSession("cc-reopen-same-prompt");
+		newProcess();
+
+		scripts.push({ label: "turn 2", steps: [init("cc-x"), result("ok")] });
+		await call(P, [system("the prompt"), u1, a1, u2]).result();
+
+		assert.equal(calls.at(-1).resume, "cc-reopen-same-prompt");
+		assert.match(readFileSync(sessionFile("cc-reopen-same-prompt"), "utf8"), /written by claude code/);
+	});
+
+	it("rebuilds once from a mirror an older version wrote, which records no prompt", async () => {
+		const P = "pi-reopen-old-mirror";
+		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");
+		scripts.push({ label: "turn 1", steps: [init("cc-reopen-old-mirror"), result("first answer")] });
+		await call(P, [system("the prompt"), u1]).result();
+		ccWritesSession("cc-reopen-old-mirror");
+		const { promptDigest, ...older } = JSON.parse(readFileSync(mirrorFile(P), "utf8"));
+		assert.ok(promptDigest, "the mirror records the prompt its session was made with");
+		writeFileSync(mirrorFile(P), JSON.stringify(older));
+		newProcess();
+
+		scripts.push({ label: "turn 2", steps: [init("cc-x"), result("ok")] });
+		await call(P, [system("the prompt"), u1, a1, u2]).result();
+		const rebuilt = calls.at(-1).resume;
+		assert.doesNotMatch(readFileSync(sessionFile(rebuilt), "utf8"), /written by claude code/, "the prompt it was made with is unknown: rebuild");
+
+		ccWritesSession(rebuilt);
+		newProcess();
+		scripts.push({ label: "turn 3", steps: [init("cc-x"), result("ok")] });
+		await call(P, [system("the prompt"), u1, a1, u2, say("ok"), user("again")]).result();
+		assert.equal(calls.at(-1).resume, rebuilt, "the rebuilt session's mirror records the prompt: resume from then on");
+		assert.match(readFileSync(sessionFile(rebuilt), "utf8"), /written by claude code/);
+	});
+
 	it("rebuilds when Claude Code's session file is gone", async () => {
 		const P = "pi-reopen-no-file";
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("next");

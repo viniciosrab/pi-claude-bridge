@@ -88,6 +88,9 @@ export class QueryContext {
 	/** A steer never reached CC. A first query has no session mirror yet, so
 	 *  completion must carry this into the mirror it creates. */
 	missedSteer = false;
+	/** The prompt this query sends, as promptDigestFor hashes it: the session it
+	 *  completes or aborts on was made with it. */
+	promptDigest: string | undefined = undefined;
 
 	// Per-turn (reset together)
 	turnOutput: AssistantMessage | null = null;
