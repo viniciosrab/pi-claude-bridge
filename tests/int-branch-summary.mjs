@@ -51,6 +51,5 @@ describe("native branch summarization", () => {
 		assert.match(log, /provider: one-off summarizer call \(cacheRetention none\) routed to isolated summary/, "native summary must route via the provider marker");
 		assert.match(log, /compact summary: spawn/, "isolated summary never started");
 		assert.match(log, /compact summary: done textLen=[1-9]\d*/, "isolated summary produced no text");
-		assert.doesNotMatch(log, /no capture for this \d+-char system prompt/, "summary consulted the live prompt resolver");
 	});
 });

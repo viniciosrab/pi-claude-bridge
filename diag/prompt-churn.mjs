@@ -15,6 +15,11 @@
 // every capture (an upper bound, since inherited parents count as changes).
 // Prints counts and section names only, never prompt text.
 //
+// Historical: it measured the decision recorded in diag/EXTRA-USAGE-400.md ("A real pi
+// setup's whole prompt"). The bridge now forwards the whole prompt, stores no captures
+// and removes claude-bridge-captures/ at activation, so it only reads a copy kept
+// elsewhere (pass its path).
+//
 //   node diag/prompt-churn.mjs [captures-dir]
 
 import { readdirSync, readFileSync } from "node:fs";
