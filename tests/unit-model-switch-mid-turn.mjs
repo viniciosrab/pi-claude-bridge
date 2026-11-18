@@ -481,6 +481,33 @@ it("does not set the effort computed for a model whose pending switch is then re
 	assert.equal(continued.model, haiku.id, "labeled with the model that served it");
 });
 
+it("applies an effort requested behind a pending switch after the switch lands, so the newer effort wins", async () => {
+	// Haiku 5.5 to Opus 5.5 at "high"; the switch outlasts the wait, pi asks Opus at
+	// "medium" at the next tool result, and only then the switch lands.
+	mod.__test.setSwitchModelWaitMs(20);
+	let land;
+	setModelGate = new Promise((r) => { land = r; });
+	secondTool = true;
+	const [haiku, opus] = [byId("claude-haiku-5-5"), byId("claude-opus-5-5")];
+	const opts = (reasoning) => ({ sessionId: "pi-landed-then-effort", reasoning, signal: new AbortController().signal });
+	const ask = user("read a");
+	const parked = await streamSimple(haiku, { messages: [ask], tools }, opts("high")).result();
+	const toOpus = streamSimple(opus, { messages: [ask, parked, toolResult], tools }, opts("high"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parked2 = await toOpus.result();
+	const medium = streamSimple(opus, { messages: [ask, parked, toolResult, parked2, secondResult], tools }, opts("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
+	assert.equal(setModels.length, 0, "the switch to Opus is still pending at the second tool result");
+	land();
+	for (let i = 0; i < 200 && flagSettings.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+	release2();
+	const continued = await medium.result();
+	assert.equal(setModels.length, 1, "the switch landed");
+	assert.deepEqual(flagSettings.map((f) => f.settings.effortLevel), ["high", "medium"], "the switch's effort, then the newer one");
+	assert.equal(continued.model, opus.id, "the new model served the rest of the turn");
+});
+
 it("does not try an effort refused on a model again when a switch comes back to that model", async () => {
 	// Fable 5.2 at "high"; "medium" is refused on it at the first tool result. The query then
 	// switches to Fable 5.1 and back to Fable 5.2, both at "medium".
