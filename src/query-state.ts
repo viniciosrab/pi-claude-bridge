@@ -78,6 +78,10 @@ export class QueryContext {
 	 *  supply an id.
 	 */
 	piSessionId: string | null = null;
+	/** The model this query was started with. Claude Code keeps it for the whole
+	 *  query, so a tool result pi delivers under another model is still served by
+	 *  this one, and its turn is labeled with it (upstream #273). */
+	servedModel: Model<any> | null = null;
 	/** pi rewrote the history this query was built from (session_compact,
 	 *  session_tree in its own pi session). Set by markRebuildForSession, consumed
 	 *  by the tool-result delivery that discards the query. Not session-wide state:

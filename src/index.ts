@@ -930,6 +930,7 @@ if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 
 // @internal
 export const __test = {
+	resolveMcpTools,
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
 		queryImpl = withProviderSettingSources(queryImpl, () => providerSettings); // fork: provider.loadClaudeSettings
@@ -1082,6 +1083,25 @@ function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	return undefined;
 }
 
+// The tool_call hook below gives a Claude model's bash call 120 s when it sets no
+// timeout, but pi's schema tells the model there is no default, so a long command
+// run without one dies at 120 s (upstream #270). Say what the bridge does in the
+// schema Claude Code reads; pi's own tool definition is left alone.
+const PI_BASH_NO_DEFAULT = "(optional, no default timeout)";
+function withBashTimeoutDefault(tool: Tool): Tool {
+	const params = tool.parameters as { properties?: Record<string, Record<string, unknown>> } | undefined;
+	const timeout = params?.properties?.timeout;
+	if (!timeout) return tool;
+	const said = typeof timeout.description === "string" ? timeout.description : "";
+	const description = said.includes(PI_BASH_NO_DEFAULT)
+		? said.replace(PI_BASH_NO_DEFAULT, "(optional; 120 when omitted)")
+		: said ? `${said} (120 when omitted)` : "Timeout in seconds (optional; 120 when omitted)";
+	return {
+		...tool,
+		parameters: { ...params, properties: { ...params!.properties, timeout: { ...timeout, description } } } as Tool["parameters"],
+	};
+}
+
 function resolveMcpTools(context: Context): {
 	mcpTools: Tool[];
 	customToolNameToSdk: Map<string, string>;
@@ -1095,7 +1115,7 @@ function resolveMcpTools(context: Context): {
 
 	for (const tool of context.tools) {
 		const sdkName = `${MCP_TOOL_PREFIX}${tool.name}`;
-		mcpTools.push(tool);
+		mcpTools.push(tool.name === "bash" ? withBashTimeoutDefault(tool) : tool);
 		customToolNameToSdk.set(tool.name, sdkName);
 		customToolNameToSdk.set(tool.name.toLowerCase(), sdkName);
 		customToolNameToPi.set(sdkName, tool.name);
@@ -2195,7 +2215,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// handlers. Results that arrive before their handler get queued in pendingResults.
 	if (resultCtx) {
 		claimCurrentPiStream(stream, "tool-result", resultCtx, options);
-		resultCtx.resetTurnState(model);
+		// The running query answers on the model it was started with: pi switching
+		// models here takes effect at the next prompt, which opens a fresh query.
+		const served = resultCtx.servedModel ?? model;
+		if (served.id !== model.id) debug(`provider: ${model.id} requested at a tool result, query continues on ${served.id} until the next prompt`);
+		resultCtx.resetTurnState(served);
 		resultCtx.bindRunSignal?.(options?.signal, stream);
 		// A rewrite that armed the mark after this query parked gets copied here,
 		// though markRebuildForSession usually reaches it directly.
@@ -2292,6 +2316,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// query's stdin, not just mismatching a map.
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
+	queryCtx.servedModel = model;
 	queryCtx.latestCursor = 0;
 	latestSent.delete(queryCtx); // fork: reopen resume
 	// The served pi session, for rewrite attribution on delivery (issue #101
