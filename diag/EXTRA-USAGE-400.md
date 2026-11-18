@@ -61,3 +61,18 @@ curl -X POST 'https://api.anthropic.com/v1/messages?beta=true' \
 ```
 
 Interleave known-good controls to rule out account-state changes. Record rate-limit events, especially `isUsingOverage` and overage availability; SDK list-price cost estimates are not evidence of charges. Captures contain sensitive conversations and credentials and must not be shared unredacted.
+
+### A real pi setup's whole prompt: November 18, 2026
+
+Before forwarding pi's whole system prompt (upstream #262), the same probe sent the whole prompt this fork's maintainer's pi renders (pi 1.5.2, gentle-pi and other extensions loaded, 104,653 characters, `--render-mine`; it carries pi's 1.5 preamble and both `docs/custom-provider.md` and `docs/packages.md`). Extra Usage was off (`org_level_disabled`), so a gated request would have failed with 400 instead of billing. Agent SDK 0.3.321, `diag/probe-third-party-gate.mjs`, interleaved, twice each on Haiku 5.5:
+
+| Arm | Result | Rate limit |
+|---|---|---|
+| control (no append) | ok ×2 | `five_hour:allowed`, `overageInUse: false` |
+| `pi-1.5.2.txt` (preset append) | ok ×2 | same |
+| whole real prompt (preset append) | ok ×2 | same |
+| whole real prompt (`plain:`, no preset) | ok ×2 | same |
+
+The whole real prompt also passed once on Opus 5.5. Fable 5.2 answered 429 "requires usage credits" for the control too, so that is the account's model access, not the prompt.
+
+`diag/prompt-churn.mjs` read the prompt captures of the same machine's 555 recent pi sessions: the whole prompt changed 50 times and the portable projection the bridge forwards today 49 times, mostly in the `tools` and `mcp_servers` sections. On this setup, forwarding the whole prompt would change the system block about as often as today's projection does.
