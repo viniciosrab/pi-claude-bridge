@@ -22,6 +22,12 @@ export interface PendingToolCall {
  *  is failed. A call pi did receive is never failed, however long its tool runs. */
 const LOST_TOOL_CALL_TIMEOUT_MS = 120_000;
 
+/** How long a continuation query (one Claude Code resumes as an interrupted turn, with
+ *  nothing on stdin) may show no sign of working on its turn before the bridge writes
+ *  the continue prompt on stdin after all. CC judged the turn complete, and would
+ *  otherwise wait on stdin forever (upstream #274). */
+const CONTINUATION_FALLBACK_MS = 30_000;
+
 export class QueryContext {
 	// Query-scoped (fully isolated per query)
 	activeQuery: unknown | null = null;
@@ -71,6 +77,14 @@ export class QueryContext {
 	lastRateLimitWarnThreshold: number | undefined;
 	/** Already warned that this query billed Extra Usage with the plan limit not reached. */
 	warnedUnplannedOverage = false;
+	/** Whether the query has shown a sign of working on its turn: a stream event, an
+	 *  assistant message, a result or an API retry. Init and hooks do not count. */
+	sawTurnWork = false;
+	/** A continuation query's pending fallback (CONTINUATION_FALLBACK_MS), cleared once
+	 *  the turn starts or the query ends. */
+	continuationFallback: ReturnType<typeof setTimeout> | null = null;
+	/** See CONTINUATION_FALLBACK_MS; a field so tests need not wait it out. */
+	continuationFallbackMs = CONTINUATION_FALLBACK_MS;
 	/** pi session this query serves, from SimpleStreamOptions.sessionId at fresh-query
 	 *  setup. A bridge process serves several pi sessions at once (subagents run their
 	 *  own AgentSessions), and history rewrites must only discard the rewriting
@@ -144,6 +158,15 @@ export class QueryContext {
 	clearToolUseSettle(): void {
 		if (this.toolUseSettle) clearTimeout(this.toolUseSettle.timer);
 		this.toolUseSettle = null;
+	}
+
+	/** Disarm the continuation fallback: `timer` only when it is still the armed one
+	 *  (a later query may have armed its own on this context), any when omitted. */
+	clearContinuationFallback(timer?: ReturnType<typeof setTimeout>): void {
+		if (timer !== undefined) clearTimeout(timer);
+		if (timer !== undefined && this.continuationFallback !== timer) return;
+		if (this.continuationFallback) clearTimeout(this.continuationFallback);
+		this.continuationFallback = null;
 	}
 
 	resetTurnState(model: Model<any>): void {
