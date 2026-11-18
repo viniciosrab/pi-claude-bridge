@@ -579,7 +579,7 @@ function pruneMirrors(now: number): void {
  *  failure only means the next process rebuilds, as before. */
 export function saveMirror(piSessionId: string, record: Omit<MirrorRecord, "pid">, now = Date.now()): void {
 	try {
-		// Owner-only, like the capture store: an aborted turn's record holds its prompt.
+		// Owner-only: an aborted turn's record holds its prompt.
 		mkdirSync(mirrorDir(), { recursive: true, mode: 0o700 });
 		// mkdir's mode applies only on creation: tighten a directory an older version made.
 		// Best effort on its own: a filesystem that refuses chmod must not stop the save.

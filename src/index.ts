@@ -16,13 +16,11 @@ import { applyLongContext, buildModels, claudeCodeModelId, extraUsageByChoice, t
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
-import { forgetSessionStore, loadOwnCaptures, loadParentCaptures, persistSessionCapture } from "./prompt-capture-store.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, removedAskClaudeNotice, systemPromptPresetEnabled, type Config } from "./config.js";
-import { sharedPromptCaptures } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
@@ -957,9 +955,6 @@ export const __test = {
 	CC_CHILD_ENV,
 	ccChildEnv,
 	buildMcpServers,
-	get promptCaptures() {
-		return promptCaptures;
-	},
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -1022,22 +1017,6 @@ function showRemovedAskClaudeNoticeOnce(): void {
 	piUI?.notify(removedAskClaudeNoticeText, "warning");
 	removedAskClaudeNoticeText = undefined;
 }
-
-// Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
-// is keyed rather than held in a single slot. One process-wide instance, shared
-// across every extension module instance: isolated subagents re-evaluate this
-// module, and the pinned stream they all route through resolves against it.
-const promptCaptures = sharedPromptCaptures((diagnostic) => {
-	const first = diagnostic.matches[0];
-	debug(
-		`prompt-capture: no match for ${diagnostic.systemPrompt.length}-char system prompt. `
-		+ (first
-			? `closest known (${first.key.length}-char) shares its first ${first.firstDivergent} chars and diverges at offset ${first.firstDivergent}: `
-			  + JSON.stringify(diagnostic.systemPrompt.slice(first.firstDivergent - 40, first.firstDivergent + 60))
-			: "no known captures to compare against."
-		) + ` known keys=${diagnostic.matches.length}`,
-	);
-});
 
 /** Close every query a shutting-down pi session still holds. Scoped to that
  *  session: subagents run in the parent's process and shut down while the
@@ -2635,15 +2614,6 @@ export default function (pi: ExtensionAPI) {
 		rememberSessionCwd(ctx.sessionManager.getSessionId(), ctx.cwd);
 		removedAskClaudeNoticeText = removedAskClaudeNotice();
 		rememberForkParent(event, ctx.sessionManager.getSessionId()); // fork: fork cache
-		// A session in another process (a pi-subagents background child) may query with
-		// its parent's prompt; load the parent session's stored captures (issue #37).
-		const parentSession = ctx.sessionManager.getHeader?.()?.parentSession;
-		const loaded = loadParentCaptures(parentSession, ctx.sessionManager.getSessionId(), promptCaptures);
-		if (loaded > 0) debug(`session_start: loaded ${loaded} prompt capture${loaded === 1 ? "" : "s"} from parent session ${parentSession}`);
-		// A session resumed in a new process: keep what an earlier process stored for it,
-		// which this process's next write would otherwise replace.
-		const ownLoaded = loadOwnCaptures(ctx.sessionManager.getSessionId(), promptCaptures);
-		if (ownLoaded > 0) debug(`session_start: loaded ${ownLoaded} prompt capture${ownLoaded === 1 ? "" : "s"} stored earlier for this session`);
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
@@ -2654,82 +2624,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_tree", (event, ctx) => {
 		rememberSummarySession(event.signal, ctx.sessionManager.getSessionId());
 	});
-	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
-	// Code's preset carries its own tool and permission guidance that the bridge
-	// still depends on, so both flags are forwarded as an append.
-	//
-	// The options (custom/append/contextFiles/skills/sections) are pi config, stable across a
-	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
-	// at before_agent_start so the agent_start recording below can reuse them.
-	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
-	let lastSystemPromptOptions: RecordOptions | undefined;
-	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
-		customPrompt?: string;
-		appendSystemPrompt?: string;
-		contextFiles?: { path: string; content: string }[];
-		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
-		sections?: Record<string, string>;
-		selectedTools?: string[];
-	} | undefined) {
-		if (!systemPrompt) return;
-		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
-		promptCaptures.record(systemPrompt, {
-			custom: options?.customPrompt,
-			append: options?.appendSystemPrompt,
-			contextFiles: options?.contextFiles ?? [],
-			skills: hasRead ? options?.skills ?? [] : [],
-			sections: options?.sections,
-		}, source);
-	}
-	// Stores the captures of a session pi persists, for a session forked from it in
-	// another process (src/prompt-capture-store.ts). A session without a file has no
-	// child that can name it as parentSession.
-	function persistForOtherProcesses(ctx: ExtensionContext | undefined, systemPrompt: string | undefined) {
-		const sessionManager = ctx?.sessionManager;
-		if (!systemPrompt || !sessionManager?.getSessionFile?.()) return;
-		persistSessionCapture(sessionManager.getSessionId(), systemPrompt, promptCaptures);
-	}
-	pi.on("before_agent_start", (event) => {
-		lastSystemPromptOptions = event.systemPromptOptions;
-		recordSystemPrompt("before_agent_start", event.systemPrompt, event.systemPromptOptions);
-	});
-	// The prompt the provider actually queries with is the fully-widened one: MCP tool
-	// descriptions merge into the system prompt only after their servers connect, which
-	// is after before_agent_start. ctx.getSystemPrompt() returns that widened prompt by
-	// agent_start (verified: before_agent_start=10,988 chars vs agent_start/query=23,479).
-	// A subagent embeds the widened parent prompt verbatim (pi-subagents reads
-	// ctx.getSystemPrompt() at dispatch), so unless the widened prompt is a capture key
-	// too, the child's turn resolves against nothing and fails. Recording it here,
-	// before the query, restores the match.
-	//
-	// agent_start also captures a handler-returned forceSystemPrompt, which
-	// buildSystemPrompt renders verbatim.
+	// The provider forwards pi's system message whole (toBridgeContext), so there is
+	// nothing to record here. agent_start still clears a stale tool rejection: a
+	// terminating tool can end the previous run without consuming its rejection.
 	pi.on("agent_start", (_event, ctx) => {
-		// A terminating tool can end the previous run without consuming its rejection.
 		rejectedToolCalls.delete(ctx?.sessionManager?.getSessionId?.() ?? null);
-		const systemPrompt = ctx.getSystemPrompt();
-		recordSystemPrompt("agent_start", systemPrompt, lastSystemPromptOptions);
-		persistForOtherProcesses(ctx, systemPrompt);
-	});
-
-	// Mid-run re-renders: turn_start fires before every turn (first turn included)
-	// after the turn's prompt is final: prepareNextTurnWithContext has
-	// re-rendered the options (pi's section-based prompt) and any mid-run
-	// setActiveToolsByName rebuild has already landed. Re-keying at each boundary
-	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
-	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
-	// next before_agent_start — accepted: a stale skills list beats failing the turn.
-	pi.on("turn_start", (_event, ctx) => {
-		const systemPrompt = ctx.getSystemPrompt();
-		recordSystemPrompt("turn_start", systemPrompt, lastSystemPromptOptions);
-		persistForOtherProcesses(ctx, systemPrompt);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		forgetSessionCwd(ctx.sessionManager.getSessionId());
 		closeSessionQueries(ctx.sessionManager.getSessionId());
 		clearSession("session_shutdown");
-		const sessionManager = ctx?.sessionManager;
-		if (sessionManager) forgetSessionStore(sessionManager.getSessionId());
 	});
 
 	// Pi and summary extensions own compaction and branch summaries; native calls use the

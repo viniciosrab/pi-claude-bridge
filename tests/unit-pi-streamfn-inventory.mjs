@@ -4,7 +4,7 @@
  * Which pi modules can drive our provider.
  *
  * Anything pi hands a `streamFn` can route an LLM call through the registered
- * provider — this one — carrying a system prompt we never recorded. Branch
+ * provider — this one — carrying its own system prompt. Branch
  * summarization did exactly that and nobody noticed until it started failing
  * turns, because a behavioural contract test can only probe the entry points we
  * already know about; it structurally cannot find the one we don't.
@@ -71,7 +71,7 @@ describe("pi streamFn consumers", () => {
 			unexpected,
 			[],
 			`pi has streamFn consumers this bridge has never considered: ${unexpected.join(", ")}. `
-			+ `Each can route an LLM call through our provider with a system prompt no before_agent_start recorded.`,
+			+ `Each can route an LLM call through our provider with its own system prompt.`,
 		);
 
 		// Keep the inventory aligned with pi's current summary consumers.
