@@ -2315,6 +2315,26 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		activeQuery = ctx().activeQuery !== null;
 	}
 
+	// pi moved past a call this session's query is parked on: its result is in pi's
+	// history but was never delivered here (a `/model` to another provider while the
+	// tool ran sent it there, and the conversation went on there). Nothing will ever
+	// answer the waiting handler, and the watchdog keeps it alive because pi has the
+	// call, so every later prompt of the session would run nested in a dead turn.
+	// Discard it; the fresh query rebuilds from pi's history. Only calls whose
+	// handlers still wait, not turnToolCallIds: a query of the same session started
+	// from inside a tool carries the owner's earlier results in its history.
+	if (!resultCtx && options?.sessionId) {
+		const answered = new Set(context.messages.flatMap((m) => (m.role === "toolResult" ? [m.toolCallId] : [])));
+		for (const c of [...activeQueryContexts]) {
+			if (c.piSessionId !== options.sessionId || !c.activeQuery || c.aborting) continue;
+			const movedPast = [...c.pendingToolCalls.keys()].find((id) => answered.has(id));
+			if (!movedPast) continue;
+			debug(`provider: pi continued past tool call [${movedPast}] without delivering its result here, discarding its parked query`);
+			discardQuery(c, "pi continued the conversation without this tool result; this query was discarded.");
+			activeQuery = ctx().activeQuery !== null;
+		}
+	}
+
 	const isReentrantUserQuery = activeQuery && lastMsgRole === "user" && allResults.length === 0;
 	if (isReentrantUserQuery) {
 		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${context.messages.length}`);
