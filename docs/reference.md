@@ -6,7 +6,7 @@ Details for extension authors and contributors. For installing and configuring t
 
 Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-2`, `claude-bridge/claude-opus-5-5`, or `claude-bridge/claude-haiku-5-5`.
 
-Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary. Claude Code cuts each MCP tool description at 2,048 characters; the bridge lifts that limit, so long descriptions reach Claude whole. A tool call lost between Claude Code and pi ends the turn with an error naming the tool instead of leaving it on "Working".
+Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. pi's whole system prompt — tools, rules, context files, skills and extensions' sections, as pi renders it — reaches Claude after Claude Code's own `claude_code` preset, and steering mid-turn reaches Claude at the next tool boundary. Claude Code cuts each MCP tool description at 2,048 characters; the bridge lifts that limit, so long descriptions reach Claude whole. A tool call lost between Claude Code and pi ends the turn with an error naming the tool instead of leaving it on "Working".
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
@@ -38,6 +38,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
 - `loadClaudeSettings` — which Claude Code settings (hooks, plugins, `env`, `apiKeyHelper`) apply on each turn. `"user"` (default) loads `~/.claude/settings.json` only; `"all"` (or `true`) also loads the repository's `.claude/settings.json` and `.claude/settings.local.json`, for repositories you trust; `false` loads none.
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
+- `systemPromptPreset` — `true` (default) sends Claude Code's own `claude_code` preset first, with pi's whole system prompt as its append; `false` sends pi's prompt alone as the whole system prompt. Upstream's spellings work too (`"claude_code"` means on, `null` off); any other value is reported and ignored. Compaction and branch summaries always send pi's summarization prompt alone.
 
 
 **Leftover keys:** the bridge never writes to its config. A `startupNoticeShown` mark left by older versions, and the `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool, are ignored.
@@ -61,22 +62,11 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 
 ## Compatibility with other extensions
 
-### Which injection routes reach Claude Code
+### System prompt and message injection
 
-The bridge forwards pi's structured parts — project context files, skills, custom prompt, appended instructions, and custom prompt sections (`systemPromptOptions.sections`) — and drops the rest. Measured against the request body (`diag/capture-proxy.mjs`):
+The bridge forwards pi's system prompt and messages whole, as pi renders them, so any injection route pi honors reaches Claude Code: `before_agent_start` (`message`, `systemPrompt`, `systemPromptOptions.sections`), `context` and `context_with_system` edits, `--system-prompt` and `--append-system-prompt` alike. A prompt that replaces pi's is forwarded as it is; nothing is matched or refused. The system prompt follows Claude Code's own `claude_code` preset unless `provider.systemPromptPreset` is `false`.
 
-| Route | Reaches Claude Code |
-|---|---|
-| `before_agent_start` -> `message` | Yes, as literal prompt text in the user turn |
-| `context` editing the last user message | Yes, as literal prompt text |
-| `--append-system-prompt` | Yes, with pi's appended instructions |
-| `context_with_system` editing the system message | Yes when it wraps pi's prompt; the turn fails when it replaces one |
-| `before_agent_start` -> `systemPromptOptions.sections` | Yes, one `<name>` block per section |
-| `before_agent_start` -> `systemPrompt` | No, dropped |
-
-Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request. And system-prompt edits work by *wrapping*: replacing pi's prompt leaves the bridge with nothing to match, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions. The error names the closest known prompt and where it diverged.
-
-To add instructions, use `message`, `context`, or a system-message edit that keeps pi's prompt intact.
+Claude Code itself loads no `CLAUDE.md`, `AGENTS.md` or `.claude/rules/` on the provider path: pi's context files are already in pi's prompt.
 
 ### Hooks written for Claude Code
 
@@ -94,7 +84,7 @@ pi runs compaction and branch summaries natively. The bridge routes their `cache
 
 ### pi's harness in the system prompt
 
-The bridge forwards prompt text that carries pi's own system prompt wording or the two documentation paths `docs/custom-provider.md` and `docs/packages.md`, for example a subagent that embeds its parent's whole prompt. Up to pi 1.4, Anthropic billed a request carrying pi's harness as Extra Usage (or failed it with a 400 "out of extra usage") and the bridge refused such turns; the wording pi renders since 1.5.1 is served on the plan, so the refusal is gone and the bridge requires pi 1.5.1 or newer. The measurements are upstream's (elidickinson/pi-claude-bridge `diag/EXTRA-USAGE-400.md` and `diag/third-party-gate/`).
+The bridge forwards pi's whole prompt, pi's own wording and the two documentation paths `docs/custom-provider.md` and `docs/packages.md` included, and so does a subagent that embeds its parent's whole prompt. Up to pi 1.4, Anthropic billed a request carrying pi's harness as Extra Usage (or failed it with a 400 "out of extra usage"); the wording pi renders since 1.5.1 is served on the plan, so the bridge requires pi 1.5.1 or newer. Upstream measured pi's own prompt (elidickinson/pi-claude-bridge `diag/EXTRA-USAGE-400.md` and `diag/third-party-gate/`); this fork's `diag/EXTRA-USAGE-400.md` ("A real pi setup's whole prompt") adds a 104,653-character prompt from a pi 1.5.2 setup with other extensions loaded, served on the plan with Extra Usage off, both after the preset and alone.
 
 If Claude Code reports a request billed to Extra Usage while no plan limit was reached, the bridge shows a warning once per query, unless that model's 1M context runs on Extra Usage because you set `longContextExtraUsage`. An "out of extra usage" failure with no plan limit reached gets the same explanation appended.
 
@@ -102,24 +92,12 @@ If Claude Code reports a request billed to Extra Usage while no plan limit was r
 
 The bridge does not show plan usage itself. Claude Code sends a `rate_limit_event` when a usage window changes, and the bridge passes it to pi's `after_provider_response` event as `anthropic-ratelimit-unified-*` headers. Events are not tied to one response: one that arrives after a turn has ended on a tool call is reported on the next provider call, and only the latest is kept. The headers use the names that the Anthropic API uses (for example `anthropic-ratelimit-unified-5h-utilization`). The bridge sends only the headers that it can make from the event: the status, the reset time, the representative claim, the overage status and reset, and the utilization and reset of each window. The status code is always 200. An extension that reads these headers for the built-in `anthropic` provider can also accept `claude-bridge` without other changes.
 
-### Using claude bridge with @gotgenes/pi-subagents
-
-Requires the following in `~/.pi/agent/subagents.json`:
-
-```json
-{"promptInheritance": {"claude-bridge": "portable"}}
-```
-
-### Forked subagents in another process
-
-A [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) child with forked context (`context: "fork"`, or an agent such as `oracle` whose default context is `fork`) sends its parent's system prompt to reuse the parent's prompt cache. A background child (`async: true`) runs in its own process, which has not seen that prompt. So each pi session that has a session file stores its prompt captures in `claude-bridge-captures/<session id>.json` in pi's agent dir, and a session whose header names a `parentSession` loads that session's captures when it starts. The files are owner-only and hold the assembled system prompt and what the bridge sends to Claude Code: context files (AGENTS.md), skill names, descriptions and paths, prompt sections, and the custom and appended prompts. A session resumed in a new process reloads its own earlier captures, so they are kept when it writes its file again. Files not written or refreshed for 7 days are removed. A session started with `--no-session` stores nothing.
-
 ## Known issues
 
 **A session rebuild re-sends the whole conversation.** The bridge rewrites Claude Code's session from pi's history whenever pi rewrites that history — `/compact`, tree navigation, or an extension that edits past messages — and the next request usually misses the prompt cache for everything past the system prompt. An abort, an API error, `/fork`, `/clone` and reopening a session resume Claude Code's own session file instead, and keep the cache (see `CHANGELOG.md`).
 
 **Files Claude Code edits are not carried across a rebuild.** The edit itself survives in the history as a tool call and result — what's lost is the post-edit file snapshot. `@file` expansions *are* carried.
 
-**System prompt changes mid-session may not reach the model.** The bridge keeps Claude Code's default prompt recording: project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused on resume. This keeps the cached prefix stable, but later changes may not take effect until a rebuild or compaction. Start a new session if updated instructions must take effect immediately.
+**A system prompt change misses the prompt cache, and waits for the next prompt.** Each new prompt sends pi's current system prompt and keeps resuming the same Claude Code session, so a change (a tool turned on, an extension's section) costs a prompt-cache miss on that request, as a changed system prompt does on any provider. A change pi makes while a turn runs, between tool calls, reaches Claude at the next prompt: the running Claude Code query keeps the prompt it started with.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.
