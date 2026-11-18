@@ -49,10 +49,13 @@ const toolResult = { role: "toolResult", toolCallId: "toolu_1", toolName: "read"
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 
 const started = [];
+/** The effort and thinking options of each query started. */
+const startedSettings = [];
 const setModels = [];
 /** applyFlagSettings calls, with the setModel count at the time. */
 const flagSettings = [];
 let flagDelayMs = 0;
+let flagFails = false;
 let release;
 let release2;
 let release3;
@@ -70,9 +73,11 @@ beforeEach(() => {
 	resetSharedSession();
 	activeQueryContexts.clear();
 	started.length = 0;
+	startedSettings.length = 0;
 	setModels.length = 0;
 	flagSettings.length = 0;
 	flagDelayMs = 0;
+	flagFails = false;
 	setModelFails = false;
 	setModelDelayMs = 5;
 	secondTool = false;
@@ -82,6 +87,7 @@ beforeEach(() => {
 	resultsAtSwitch.length = 0;
 	setQuery(({ prompt, options }) => {
 		started.push(options.extraArgs?.model ?? options.model);
+		startedSettings.push({ effort: options.effort, thinking: options.thinking });
 		const gate = new Promise((r) => { release = r; });
 		const gate2 = new Promise((r) => { release2 = r; });
 		const gate3 = new Promise((r) => { release3 = r; });
@@ -118,7 +124,7 @@ beforeEach(() => {
 			resultsAtSwitch.push(ctx().pendingResults.size);
 			if (setModelFails) throw new Error("setModel refused");
 		};
-		gen.applyFlagSettings = async (settings) => { if (flagDelayMs) await new Promise((r) => setTimeout(r, flagDelayMs)); flagSettings.push({ settings, afterSetModels: setModels.length, resultsQueued: ctx().pendingResults.size }); };
+		gen.applyFlagSettings = async (settings) => { if (flagDelayMs) await new Promise((r) => setTimeout(r, flagDelayMs)); flagSettings.push({ settings, afterSetModels: setModels.length, resultsQueued: ctx().pendingResults.size }); if (flagFails) throw new Error("applyFlagSettings refused"); };
 		gen.interrupt = async () => {};
 		gen.close = () => onClose();
 		return gen;
@@ -379,4 +385,88 @@ it("labels the continuation with the new model once setModel lands, even when th
 	assert.equal(continued.model, "claude-fable-5-1", "the new model served the continuation");
 	await new Promise((r) => setTimeout(r, 200));
 	assert.deepEqual(flagSettings.map((f) => f.settings), [{ effortLevel: "high" }], "the effort still went through");
+});
+
+/** Parks on `model` at pi reasoning `from`, then delivers the tool result on the same model at `to`. */
+async function effortChange(sid, model, from, to) {
+	const ask = user("read a");
+	const parked = await streamSimple(model, { messages: [ask], tools }, { sessionId: sid, reasoning: from, signal: new AbortController().signal }).result();
+	assert.equal(parked.stopReason, "toolUse");
+	const continuation = streamSimple(model, { messages: [ask, parked, toolResult], tools }, { sessionId: sid, reasoning: to, signal: new AbortController().signal });
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	return { ask, parked, continued: await continuation.result() };
+}
+
+it("sets the new effort before the result when only the thinking level changes at a tool result", async () => {
+	const opus = byId("claude-opus-5-5");
+	const { continued } = await effortChange("pi-effort-only", opus, "high", "medium");
+	assert.deepEqual(startedSettings.map((s) => s.effort), ["high"], "the query started at high");
+	assert.deepEqual(setModels, [], "no model switch");
+	assert.deepEqual(flagSettings, [{ settings: { effortLevel: "medium" }, afterSetModels: 0, resultsQueued: 0 }]);
+	assert.equal(started.length, 1, "the result went to the running query");
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	assert.equal(continued.model, opus.id);
+});
+
+it("sets no effort when the thinking level at a tool result is the one the query serves", async () => {
+	const { continued } = await effortChange("pi-effort-same", byId("claude-opus-5-5"), "high", "high");
+	assert.deepEqual(setModels, []);
+	assert.deepEqual(flagSettings, []);
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+});
+
+it("does not change the effort mid-turn when the new level turns thinking off; the next prompt does", async () => {
+	// Haiku 5.5 can disable thinking, and a running query keeps the thinking it started with.
+	const haiku = byId("claude-haiku-5-5");
+	const { ask, parked, continued } = await effortChange("pi-effort-thinking", haiku, "high", undefined);
+	assert.deepEqual(flagSettings, [], "nothing applied mid-turn");
+	assert.deepEqual(setModels, []);
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	await streamSimple(haiku, { messages: [ask, parked, toolResult, continued, user("again")], tools },
+		{ sessionId: "pi-effort-thinking", signal: new AbortController().signal }).result();
+	assert.equal(started.length, 2, "the next prompt opened a fresh query");
+	assert.deepEqual(startedSettings[1], { effort: undefined, thinking: { type: "disabled" } }, "with thinking off");
+});
+
+it("sets a changed effort once: the next tool result at the same level applies nothing", async () => {
+	secondTool = true;
+	const opus = byId("claude-opus-5-5");
+	const ask = user("read a");
+	const at = (reasoning) => ({ sessionId: "pi-effort-twice", reasoning, signal: new AbortController().signal });
+	const parked = await streamSimple(opus, { messages: [ask], tools }, at("high")).result();
+	const toMedium = streamSimple(opus, { messages: [ask, parked, toolResult], tools }, at("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parkedAgain = await toMedium.result();
+	assert.equal(parkedAgain.stopReason, "toolUse", "the query went on to a second tool call");
+	const last = streamSimple(opus, { messages: [ask, parked, toolResult, parkedAgain, secondResult], tools }, at("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
+	release2();
+	const continued = await last.result();
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	assert.deepEqual(flagSettings.map((f) => f.settings), [{ effortLevel: "medium" }], "one effort change in total");
+	assert.equal(started.length, 1);
+});
+
+it("does not try a refused effort again at the next tool result; the next prompt starts with it", async () => {
+	flagFails = true;
+	secondTool = true;
+	const opus = byId("claude-opus-5-5");
+	const ask = user("read a");
+	const at = (reasoning) => ({ sessionId: "pi-effort-refused", reasoning, signal: new AbortController().signal });
+	const parked = await streamSimple(opus, { messages: [ask], tools }, at("high")).result();
+	const toMedium = streamSimple(opus, { messages: [ask, parked, toolResult], tools }, at("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_1"); i++) await new Promise((r) => setTimeout(r, 5));
+	release();
+	const parkedAgain = await toMedium.result();
+	const last = streamSimple(opus, { messages: [ask, parked, toolResult, parkedAgain, secondResult], tools }, at("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
+	release2();
+	const continued = await last.result();
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued", "the turn still continued");
+	assert.equal(flagSettings.length, 1, "the refused effort was not tried again");
+	await streamSimple(opus, { messages: [ask, parked, toolResult, parkedAgain, secondResult, continued, user("again")], tools }, at("medium")).result();
+	assert.equal(started.length, 2, "the next prompt opened a fresh query");
+	assert.equal(startedSettings[1].effort, "medium");
 });
