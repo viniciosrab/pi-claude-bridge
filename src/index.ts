@@ -962,6 +962,9 @@ if (DEBUG) queryImpl = withTurnTiming(queryImpl, debug); // fork: debug timing
 
 // @internal
 export const __test = {
+	setSwitchModelWaitMs(ms: number | null) {
+		switchModelWaitMs = ms ?? SWITCH_MODEL_WAIT_MS;
+	},
 	resolveMcpTools,
 	setQuery(fn: typeof query | null) {
 		queryImpl = fn ?? query;
@@ -1972,23 +1975,39 @@ function steerMissedSession(c: QueryContext, text: string): void {
  *
  *  Both the post-tool-call drain and the FIFO ordering are CC CLI internals,
  *  not SDK contract — tests/int-tool-message.mjs is the tripwire if they move. */
+/** How long tool results wait for a model switch: setModel makes a validation request
+ *  to the API, and a result held back on it holds the turn. */
+const SWITCH_MODEL_WAIT_MS = 15_000;
+let switchModelWaitMs = SWITCH_MODEL_WAIT_MS;
+
 /** Switch a query parked at a tool boundary to `model` before its results go in.
- *  Never rejects: a refused switch leaves the query on the model serving it. */
-async function switchRunningModel(c: QueryContext, model: Model<any>): Promise<void> {
+ *  Never rejects: a refused switch leaves the query on the model serving it. A switch
+ *  that outlasts the wait lets the results go; if it lands later, the model it set
+ *  serves from then on and labels the turn. */
+async function switchRunningModel(c: QueryContext, model: Model<any>, waitMs = switchModelWaitMs): Promise<void> {
 	const served = c.servedModel;
 	const cliModel = claudeCodeModelId(model, longContextSettings);
 	const q = c.activeQuery as { setModel?: (m?: string) => Promise<void> } | null;
-	try {
-		if (!q?.setModel) throw new Error("the query cannot switch models");
-		await q.setModel(cliModel);
-	} catch (error) {
-		debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${served?.id ?? "?"} until the next prompt:`, error);
-		return;
+	const switched = (async () => {
+		try {
+			if (!q?.setModel) throw new Error("the query cannot switch models");
+			await q.setModel(cliModel);
+		} catch (error) {
+			debug(`provider: ${model.id} requested at a tool result, switch refused, query continues on ${served?.id ?? "?"} until the next prompt:`, error);
+			return;
+		}
+		// A query that ended or was replaced meanwhile serves nothing more.
+		if (c.activeQuery !== q) return;
+		debug(`provider: switched the running query from ${served?.id ?? "?"} to ${cliModel} at a tool result`);
+		c.servedModel = model;
+		if (c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+	})();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const waited = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); timer.unref?.(); });
+	if (await Promise.race([switched, waited]) === "timeout") {
+		debug(`provider: switch to ${cliModel} still pending after ${waitMs} ms, delivering the tool results`);
 	}
-	debug(`provider: switched the running query from ${served?.id ?? "?"} to ${cliModel} at a tool result`);
-	c.servedModel = model;
-	// Nothing of the continuation has streamed yet: the results are delivered after this.
-	if (c.turnOutput) Object.assign(c.turnOutput, { api: model.api, provider: model.provider, model: model.id });
+	clearTimeout(timer);
 }
 
 async function deliverToolResults(

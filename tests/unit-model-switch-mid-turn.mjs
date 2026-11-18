@@ -52,6 +52,7 @@ const started = [];
 const setModels = [];
 let release;
 let setModelFails = false;
+let setModelDelayMs = 5;
 /** Results the bridge had handed the query when each setModel call was made. */
 const resultsAtSwitch = [];
 beforeEach(() => {
@@ -60,6 +61,8 @@ beforeEach(() => {
 	started.length = 0;
 	setModels.length = 0;
 	setModelFails = false;
+	setModelDelayMs = 5;
+	mod.__test.setSwitchModelWaitMs(null);
 	resultsAtSwitch.length = 0;
 	setQuery(({ prompt, options }) => {
 		started.push(options.extraArgs?.model ?? options.model);
@@ -77,7 +80,7 @@ beforeEach(() => {
 			}
 		})();
 		gen.setModel = async (m) => {
-			await new Promise((r) => setTimeout(r, 5));
+			await new Promise((r) => setTimeout(r, setModelDelayMs));
 			setModels.push(m);
 			resultsAtSwitch.push(ctx().pendingResults.size);
 			if (setModelFails) throw new Error("setModel refused");
@@ -147,4 +150,17 @@ it("does not switch when the model requested at a tool result is the one serving
 	const continued = await continuation.result();
 	assert.equal(continued.model, first.id);
 	assert.deepEqual(setModels, []);
+});
+
+it("delivers the tool result when the switch outlasts the wait, so a slow switch never holds the turn", async () => {
+	mod.__test.setSwitchModelWaitMs(20);
+	setModelDelayMs = 300;
+	const started = Date.now();
+	const { continued } = await switchAtToolResult("pi-slow-switch");
+	assert.ok(Date.now() - started < 250, "the result waited for the switch past the bound");
+	assert.equal(continued.content.find((b) => b.type === "text")?.text, "continued");
+	assert.equal(continued.model, first.id, "labeled with the model that served it while the switch was pending");
+	assert.deepEqual(setModels, [], "the switch had not landed");
+	await new Promise((r) => setTimeout(r, 350));
+	assert.equal(setModels.length, 1, "the switch still went through");
 });
