@@ -12,7 +12,7 @@ import { abortedTurnAtStart, abortMark, deferUntilAbortSettles, dropMirror, Erro
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
-import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings } from "./models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, extraUsageByChoice, type LongContextSettings } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
@@ -21,7 +21,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { claudeCodeSettings, loadConfig, markStartupNoticeShown, removedAskClaudeNotice, type Config } from "./config.js";
+import { claudeCodeSettings, loadConfig, removedAskClaudeNotice, type Config } from "./config.js";
 import {
 	projectPromptCapture,
 	sharedPromptCaptures,
@@ -550,6 +550,10 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 	return `Claude quota exceeded — rate limit${kind}${resets}: ${failure}`;
 }
 
+/** Why Anthropic would bill or refuse Extra Usage with the plan limit not reached: it
+ *  classifies some system prompts as a third-party app's (upstream f14f2ed). */
+const THIRD_PARTY_SUSPECT = "no plan limit was reported as reached, so Anthropic may have read the system prompt as a third-party app";
+
 /** Reports to the call that owns the open stream, before its next event, as pi's own
  *  providers do. A failing consumer must not end the turn it is observing. */
 async function reportHeldRateLimit(c: QueryContext, model: Model<any>): Promise<void> {
@@ -600,7 +604,7 @@ async function runIsolatedSummary(
 			: extractIsolatedSummaryPrompt(context.messages);
 		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
 		const cwd = sessionCwdFor(summarySessionFor(options?.signal) ?? options?.sessionId);
-		const compactProviderSettings = loadConfig(cwd).provider;
+		const compactProviderSettings = loadConfig().provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
 		// Honour the caller's reasoning level, same mapping as the provider path.
@@ -936,6 +940,12 @@ export const __test = {
 		piUI = ui;
 		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
 	},
+	/** Returns the previous settings so a test can restore them. */
+	setLongContextSettings(settings: LongContextSettings): LongContextSettings {
+		const previous = longContextSettings;
+		longContextSettings = settings;
+		return previous;
+	},
 	toBridgeContext,
 	isolatedStreamFn,
 	effortForReasoning,
@@ -967,8 +977,10 @@ export const __test = {
 // dispatched (real side effects) and, because the retry carries a fresh
 // tool_use id, left the handler for the retry with no result to release it:
 // pi's result arrived keyed to the dead id, and both sides deadlocked.
+// Names match exactly: CC dispatches only the name we serve, so a served name
+// in the wrong case is one of these too.
 function piToolNameFor(name: string, customToolNameToPi: Map<string, string>): string | undefined {
-	return customToolNameToPi.get(name) ?? customToolNameToPi.get(name.toLowerCase());
+	return customToolNameToPi.get(name);
 }
 
 // Renames for Claude Code SDK param names that differ from pi's native names.
@@ -1003,37 +1015,16 @@ let piUI: ExtensionUIContext | null = null;
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
-// Defaults that silently cost the user something (no Opus 1M on Max) are
-// announced once. Deferred to the first bridge query rather
-// than session_start: the notice persists a flag to the global config, and
-// firing it on startup would write that file for every pi session that merely
-// has this extension installed. One message, because consecutive info notifies
-// overwrite each other in the TUI.
-let pendingNotices: string[] = [];
-
 // Set at each session_start for a user whose config still enables the removed AskClaude
-// tool, so every session shows it once: on its first bridge query, like the startup
-// notice, and only to a terminal user.
+// tool, so every session shows it once: on its first bridge query, and only to a
+// terminal user (`hasUI` is true in RPC mode too — it means dialogs are possible, not
+// that a human is watching).
 let removedAskClaudeNoticeText: string | undefined;
 
 function showRemovedAskClaudeNoticeOnce(): void {
 	if (!removedAskClaudeNoticeText || piMode !== "tui") return;
 	piUI?.notify(removedAskClaudeNoticeText, "warning");
 	removedAskClaudeNoticeText = undefined;
-}
-
-function showStartupNoticeOnce(): void {
-	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
-	// human is watching. Only a terminal user can act on this.
-	if (pendingNotices.length === 0 || piMode !== "tui") return;
-	const notices = pendingNotices;
-	pendingNotices = [];
-	const path = markStartupNoticeShown();
-	// pi wraps the whole notify string in the theme's dim foreground; the inner reset
-	// drops back to the terminal default rather than dim, which is fine here.
-	const title = `\x1b[33mWelcome to pi-claude-bridge\x1b[39m — settings live in ${path}`;
-	const bullets = [...notices, "This message only appears once. See README.md for more."].map((n) => `• ${n}`);
-	piUI?.notify([title, ...bullets, "─".repeat(64)].join("\n"), "info");
 }
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
@@ -1106,7 +1097,6 @@ function resolveMcpTools(context: Context): {
 		customToolNameToSdk.set(tool.name, sdkName);
 		customToolNameToSdk.set(tool.name.toLowerCase(), sdkName);
 		customToolNameToPi.set(sdkName, tool.name);
-		customToolNameToPi.set(sdkName.toLowerCase(), tool.name);
 	}
 
 	return { mcpTools, customToolNameToSdk, customToolNameToPi };
@@ -1148,6 +1138,7 @@ function toMcpToolDefs(tools: Tool[], queryCtx: QueryContext) {
 		description: tool.description,
 		inputSchema: tool.parameters,
 		handler: async (toolCallId: string) => {
+			queryCtx.dispatchedToolCalls.add(toolCallId);
 			if (queryCtx.pendingResults.has(toolCallId)) {
 				const result = queryCtx.pendingResults.get(toolCallId)!;
 				queryCtx.pendingResults.delete(toolCallId);
@@ -1439,7 +1430,11 @@ function processStreamEvent(
 function endTurnOnToolUse(c: QueryContext): void {
 	if (!c.currentPiStream || !c.turnOutput) return;
 	c.clearToolUseSettle();
-	for (const block of c.turnOutput.content) if (block.type === "toolCall") c.deliveredToolCallIds.add(block.id);
+	for (const block of c.turnOutput.content) {
+		if (block.type !== "toolCall") continue;
+		c.deliveredToolCallIds.add(block.id);
+		c.deliveredToolCallNames.set(block.id, block.name);
+	}
 	c.turnOutput.stopReason = "toolUse";
 	const stream = c.currentPiStream;
 	stream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
@@ -1626,6 +1621,47 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) settleFallbackToolUse(c, c.currentPiStream);
 }
 
+/** Errors of queries that ended on a tool call Claude Code rejected while pi was
+ *  running it, by pi session. That session's next provider call takes its entry. */
+const rejectedToolCalls = new Map<string | null, { toolCallId: string; error: string }>();
+
+/** Claude Code's own tool_result for a call pi got that never reached our MCP
+ *  handler: CC rejected it (a permission rule, a hook, input that is not JSON).
+ *  Never matches an unserved tool name (pi never gets that id) or what CC writes
+ *  for a dispatched call on interrupt. */
+function toolCallRejection(message: SDKMessage, c: QueryContext): { toolCallId: string; describe: (when: string) => string } | undefined {
+	if (message.type !== "user" || message.parent_tool_use_id !== null || !Array.isArray(message.message.content)) return undefined;
+	const block = message.message.content.find((b) => b.type === "tool_result" && c.turnToolCallIds.includes(b.tool_use_id) && !c.dispatchedToolCalls.has(b.tool_use_id));
+	if (block?.type !== "tool_result") return undefined;
+	const id = block.tool_use_id;
+	const inTurn = c.turnOutput?.content.find((b) => b.type === "toolCall" && b.id === id);
+	const name = (inTurn?.type === "toolCall" ? inTurn.name : undefined) ?? c.deliveredToolCallNames.get(id) ?? id;
+	const reason = typeof block.content === "string" ? block.content : (block.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join("");
+	return { toolCallId: id, describe: (when) => `Claude Code rejected pi's tool call "${name}" ${when}. Claude Code said: ${JSON.stringify(reason.trim())}` };
+}
+
+/** End a query whose tool call Claude Code rejected itself. Nothing will ever answer
+ *  the call pi was handed, and CC goes on to retry a tool pi may already be running,
+ *  so the query goes the way failLostToolCall's does: discarded, its parked handlers
+ *  settled, its CLI killed and the session's mirror marked for rebuild — pi's history,
+ *  which holds pi's result rather than CC's rejection, is what the next turn imports.
+ *  A stream pi is waiting on fails with the reason; when pi is still running the call,
+ *  its next provider call carrying that result fails instead (rejectedToolCalls). */
+function failRejectedToolCall(c: QueryContext, rejection: { toolCallId: string; describe: (when: string) => string }): void {
+	const running = !c.currentPiStream;
+	const beforePi = !running && c.turnBlocks.some((b: any) => b.type === "toolCall" && b.id === rejection.toolCallId);
+	debug(`consumeQuery: Claude Code rejected tool call [${rejection.toolCallId}] ${running ? "while pi runs it" : beforePi ? "before pi got it" : "after pi ran it"}, ending the query`);
+	const error = rejection.describe(running ? "after pi had started running it" : beforePi ? "before pi started running it" : "after pi ran it");
+	if (running) rejectedToolCalls.set(c.piSessionId, { toolCallId: rejection.toolCallId, error });
+	c.clearToolUseSettle();
+	discardQuery(c, `Claude Code rejected tool call ${rejection.toolCallId}; the turn was ended.`);
+	if (c.currentPiStream && c.turnOutput) {
+		c.turnOutput.stopReason = "error";
+		c.turnOutput.errorMessage = error;
+		finalizeCurrentStream(c);
+	}
+}
+
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
  *  Runs until the query ends. Per turn, the SDK yields stream_events (deltas), then
  *  an assistant message (completed blocks). On tool_use, the stream is ended by
@@ -1649,6 +1685,13 @@ async function consumeQuery(
 		const recordStreamPath = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 		if (recordStreamPath) appendFileSync(recordStreamPath, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
+		// Checked before the stream guard: pi may be running the rejected call, with
+		// no stream open. The discarded query's completion leaves everything alone.
+		const rejection = toolCallRejection(message, queryCtx);
+		if (rejection) {
+			failRejectedToolCall(queryCtx, rejection);
+			return { capturedSessionId };
+		}
 		await reportHeldRateLimit(queryCtx, model);
 		// Everything below the currentPiStream guard is content, which there is
 		// nowhere to put once a turn has ended on a tool call. Handle lifecycle
@@ -1682,6 +1725,9 @@ async function consumeQuery(
 				if (queryCtx.rateLimitRejection) {
 					resultError = describeRateLimitFailure(queryCtx.rateLimitRejection, resultError);
 					queryCtx.rateLimitRejection = null;
+				} else if (resultError.includes("out of extra usage") && !extraUsageByChoice(model, longContextSettings)) {
+					// Extra Usage off or empty, and no plan window was rejected first.
+					resultError += ` (${THIRD_PARTY_SUSPECT})`;
 				}
 				debug(`consumeQuery: error result, subtype=${message.subtype}, error=${resultError}`);
 				if (queryCtx.turnOutput && queryCtx.currentPiStream) {
@@ -1700,6 +1746,13 @@ async function consumeQuery(
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			if (info) queryCtx.heldRateLimit = info;
 			await reportHeldRateLimit(queryCtx, model);
+			// CC sets isUsingOverage only when a rejected plan window is served from Extra
+			// Usage; overageInUse alone means the request was billed there anyway.
+			if (info?.overageInUse === true && info.status !== "rejected" && info.isUsingOverage !== true
+				&& !extraUsageByChoice(model, longContextSettings) && !queryCtx.warnedUnplannedOverage) {
+				queryCtx.warnedUnplannedOverage = true;
+				piUI?.notify(`Claude Code request billed to Extra Usage: ${THIRD_PARTY_SUSPECT}, or this model needs usage credits on your plan`, "warning");
+			}
 			if (info?.status === "rejected") {
 				// Held so the failure Claude Code sends next can be named as a rate limit.
 				queryCtx.rateLimitRejection = info;
@@ -2052,7 +2105,6 @@ function failLostToolCall(c: QueryContext, toolCallId: string, toolName: string,
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const afterAbort = deferUntilAbortSettles(streamClaudeAgentSdk, sessionStateFor(options?.sessionId) ?? persistedAbortMark(options?.sessionId), model, context, options); if (afterAbort) return afterAbort; // fork: abort resume
 	const forkStart = startFromParentFork(streamClaudeAgentSdk, sessionStateFor(options?.sessionId), (s) => setSessionStateFor(options?.sessionId, { ...s, piSessionId: options?.sessionId }), debug, model, context, options); if (forkStart) return forkStart; // fork: fork cache
-	showStartupNoticeOnce();
 	showRemovedAskClaudeNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
@@ -2072,6 +2124,21 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
+
+	// The result of a call Claude Code rejected while pi ran it ends the turn with
+	// that error. Taken on every call, so it never outlives this one.
+	const rejected = rejectedToolCalls.get(options?.sessionId ?? null);
+	rejectedToolCalls.delete(options?.sessionId ?? null);
+	if (rejected && extractAllToolResults(context).some((r) => r.toolCallId === rejected.toolCallId)) {
+		debug(`provider: tool result for [${rejected.toolCallId}], which Claude Code rejected, ends the turn`);
+		const output = newAssistantOutput(model, "", "error", rejected.error);
+		queueMicrotask(() => {
+			stream.push({ type: "error", reason: "error", error: output });
+			markStreamComplete(stream);
+			stream.end();
+		});
+		return stream;
+	}
 
 	let activeQuery = ctx().activeQuery !== null;
 	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
@@ -2216,10 +2283,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	claimCurrentPiStream(stream, "fresh-query", queryCtx, options);
 	// A held event belongs to the query that received it, not to this request.
 	queryCtx.heldRateLimit = undefined;
+	// The Extra Usage warning is once per query: a fresh query on a reused
+	// top-level context warns again (tool-result continuations share it).
+	queryCtx.warnedUnplannedOverage = false;
 	queryCtx.pendingToolCalls.clear();
 	queryCtx.pendingResults.clear();
 	queryCtx.pendingSteerUuids.clear();
 	queryCtx.deliveredToolCallIds.clear();
+	queryCtx.deliveredToolCallNames.clear();
+	queryCtx.dispatchedToolCalls.clear();
 	// Stale ids would let a late result from the previous query route here via
 	// contextForToolResults — which now means pushing its steer into this
 	// query's stdin, not just mismatching a map.
@@ -2554,7 +2626,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 // --- Extension registration ---
 
 export default function (pi: ExtensionAPI) {
-	const config = loadConfig(process.cwd());
+	const config = loadConfig();
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};
 	// We need these settings to know if we're eligible for 1M context on certain models
@@ -2570,11 +2642,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 	if (registeredModels.length === 0) {
-		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.86.1)");
-	}
-
-	if (!config.startupNoticeShown && config.provider?.plan === undefined) {
-		pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
+		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=1.5.1)");
 	}
 
 	// Reset shared session on pi session lifecycle events
@@ -2666,13 +2734,14 @@ export default function (pi: ExtensionAPI) {
 	// agent_start (verified: before_agent_start=10,988 chars vs agent_start/query=23,479).
 	// A subagent embeds the widened parent prompt verbatim (pi-subagents reads
 	// ctx.getSystemPrompt() at dispatch), so unless the widened prompt is a capture key
-	// too, the child's turn resolves against nothing, falls to a verbatim side request,
-	// and ships pi's harness — tripping the server's third-party plan-eligibility check
-	// ("out of extra usage"). Recording it here, before the query, restores the match.
+	// too, the child's turn resolves against nothing and fails. Recording it here,
+	// before the query, restores the match.
 	//
 	// agent_start also captures a handler-returned forceSystemPrompt, which
 	// buildSystemPrompt renders verbatim.
 	pi.on("agent_start", (_event, ctx) => {
+		// A terminating tool can end the previous run without consuming its rejection.
+		rejectedToolCalls.delete(ctx?.sessionManager?.getSessionId?.() ?? null);
 		const systemPrompt = ctx.getSystemPrompt();
 		recordSystemPrompt("agent_start", systemPrompt, lastSystemPromptOptions);
 		persistForOtherProcesses(ctx, systemPrompt);

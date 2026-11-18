@@ -37,10 +37,18 @@ export class QueryContext {
 	latestCursor = 0;
 	pendingToolCalls = new Map<string, PendingToolCall>();
 	pendingResults = new Map<string, McpResult>();
-	/** tool_use ids emitted this turn. Sole purpose is routing a delivered result
-	 *  to the owning query when several queries are in flight — pairing a result
-	 *  to its call is done by id from Claude's tools/call _meta, not from here. */
+	/** tool_use ids emitted this turn. Routes a delivered result to the owning
+	 *  query when several queries are in flight, and tells which of Claude Code's
+	 *  tool_results answer calls pi got — pairing a result to its call is done by id
+	 *  from Claude's tools/call _meta, not from here. */
 	turnToolCallIds: string[] = [];
+	/** tool_use ids Claude Code called our MCP handler for. A tool_result for a call
+	 *  pi got that is not in here is one Claude Code rejected itself (a permission
+	 *  rule, a hook, input that is not JSON). */
+	dispatchedToolCalls = new Set<string>();
+	/** Name of each tool call pi has been handed, by id, for naming one Claude Code
+	 *  rejected after the stream carrying it ended. */
+	deliveredToolCallNames = new Map<string, string>();
 	/** Every tool call id pi has been handed over the query's turns: the calls of each
 	 *  stream the bridge ended on toolUse. With the current turn's tool calls it is the
 	 *  set of ids a result can still come back for. */
@@ -61,6 +69,8 @@ export class QueryContext {
 	/** Highest 5% utilization bucket we notified for, so repeat rate_limit_event spam is suppressed. */
 	lastRateLimitWarnStep: number | null = null;
 	lastRateLimitWarnThreshold: number | undefined;
+	/** Already warned that this query billed Extra Usage with the plan limit not reached. */
+	warnedUnplannedOverage = false;
 	/** pi session this query serves, from SimpleStreamOptions.sessionId at fresh-query
 	 *  setup. A bridge process serves several pi sessions at once (subagents run their
 	 *  own AgentSessions), and history rewrites must only discard the rewriting

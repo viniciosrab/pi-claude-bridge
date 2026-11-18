@@ -10,6 +10,8 @@ Behind the scenes, pi's tools are bridged to Claude Code but everything works li
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
+Claude Mythos 5.2 and 5.1 are listed too (at the bottom), though pi-ai leaves them out; each copies the limits of its Fable sibling. Anthropic serves Mythos only to approved programs, so on accounts without access requests fail with a 404 "There's an issue with the selected model".
+
 **1M Context:** Fable 5/5.1/5.2, Opus 5.5/5/4.8/4.7, Sonnet 5.5/5 and Haiku 5.5 get 1M context. Opus 4.6 gets 1M only on a Max plan or with Extra Usage, and Sonnet 4.6 only with Extra Usage — set `provider.plan` and/or `provider.longContextExtraUsage` as described in [Configuration](#configuration).
 
 ## Configuration
@@ -28,7 +30,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 ```
 
 `provider`:
-- `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus with 1M context.
+- `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus 4.6 with 1M context; newer Opus models get 1M on every plan.
 - `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro. Not needed for Opus 4.7 or 4.8.
 - `forceTwoHundredK` — array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if pi-ai declares a model at 1M but Claude Code won't serve it on your plan.
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
@@ -38,7 +40,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 - `rateLimitWarnings` — set `false` to hide the rate-limit warnings and reset-time notices (default `true`).
 
 
-**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. The `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool are ignored.
+**Leftover keys:** the bridge never writes to its config. A `startupNoticeShown` mark left by older versions, and the `askClaude` section and `askClaudeDeprecationShown` left by the removed AskClaude tool, are ignored.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not currently apply to extension-registered providers (like claude-bridge). Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
@@ -90,9 +92,11 @@ Hooks do not fire on isolated summary queries.
 
 pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks.
 
-### System prompt rejections
+### pi's harness in the system prompt
 
-Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (`docs/custom-provider.md` in the same prompt with `docs/packages.md`), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; `CLAUDE_BRIDGE_DEBUG=1` writes the full prompt to the bridge log when this happens.
+The bridge forwards prompt text that carries pi's own system prompt wording or the two documentation paths `docs/custom-provider.md` and `docs/packages.md`, for example a subagent that embeds its parent's whole prompt. Up to pi 1.4, Anthropic billed a request carrying pi's harness as Extra Usage (or failed it with a 400 "out of extra usage") and the bridge refused such turns; the wording pi renders since 1.5.1 is served on the plan, so the refusal is gone and the bridge requires pi 1.5.1 or newer. The measurements are upstream's (elidickinson/pi-claude-bridge `diag/EXTRA-USAGE-400.md` and `diag/third-party-gate/`).
+
+If Claude Code reports a request billed to Extra Usage while no plan limit was reached, the bridge shows a warning once per query, unless that model's 1M context runs on Extra Usage because you set `longContextExtraUsage`. An "out of extra usage" failure with no plan limit reached gets the same explanation appended.
 
 ### Plan usage for footers and quota extensions
 

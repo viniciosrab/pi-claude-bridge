@@ -8,8 +8,7 @@
  * prompt, while the prompt the provider actually queries with (and that pi-subagents
  * embeds verbatim into a child via ctx.getSystemPrompt() at dispatch) is the widened
  * one. If only the pre-widen prompt is a capture key, a subagent's turn resolves
- * against nothing, falls to a verbatim side request, and ships pi's harness — which
- * trips the server's third-party plan-eligibility check ("out of extra usage").
+ * against nothing and fails.
  *
  * These pin that agent_start records ctx.getSystemPrompt(), so the widened prompt
  * resolves directly and a child embedding it resolves by inheritance.

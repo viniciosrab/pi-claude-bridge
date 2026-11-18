@@ -25,14 +25,14 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PI_PREAMBLE, projectPromptCapture } from "../src/prompt-capture.js";
+import { projectPromptCapture } from "../src/prompt-capture.js";
 import { activateWithMockPi } from "./lib/mock-pi.mjs";
 
 const { __test } = await import("../src/index.js");
 
 const section = (name, content) => `<${name}>\n${content}\n</${name}>`;
 const parentSections = [
-	`${PI_PREAMBLE}, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.`,
+	`You are a coding assistant running inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.`,
 	section("tools", "- read: Read a file\n- bash: Run commands\n\nIn addition to the tools above, you may have access to other custom tools depending on the project."),
 	section("rules", "- Use bash for file operations like ls, rg, find\n- Be concise in your responses"),
 	section("docs", "Pi documentation (read only when the user asks about pi itself):\n- Main documentation: /pi/README.md"),
@@ -94,11 +94,8 @@ describe("agent_start capture — documented gaps", () => {
 		const capture = __test.promptCaptures.resolve(STRIPPED_CHILD);
 		assert.ok(capture, "the tail-stripped child must be recorded before projection");
 		assert.equal(capture.inherited.length, 0, "the unsupported embedding must not invent an inheritance edge");
-		assert.throws(
-			() => projectPromptCapture(capture, { skillReadTool: "none" }),
-			/prompt-capture: refusing to send this prompt/,
-			"an unmatched recorded child must fail before its harness reaches Claude Code",
-		);
+		// The embedded parent, pi's harness included, goes out as the child's own prompt.
+		assert.equal(projectPromptCapture(capture, { skillReadTool: "none" }), STRIPPED_CHILD);
 	});
 
 	it("does capture a handler-returned wholesale replacement: it resolves via the agent_start key", () => {
@@ -112,8 +109,7 @@ describe("agent_start capture — documented gaps", () => {
 		const capture = __test.promptCaptures.resolve("forced replacement prompt owning the request head");
 		assert.ok(capture, "the forced text becomes a capture key at agent_start");
 		// Caveat pinned by design: only the portable parts are projected for Claude Code;
-		// the forced text's own novel prose is not forwarded (forwarding pi-harness-shaped
-		// prose would trip the server's third-party gate).
+		// the forced text's own novel prose is not forwarded.
 	});
 
 	it("does not rescue a prompt composed outside the before_agent_start pipeline (#102 shape)", () => {

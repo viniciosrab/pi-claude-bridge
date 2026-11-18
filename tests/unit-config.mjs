@@ -1,11 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { claudeCodeSettings, globalConfigPath, loadConfig, markStartupNoticeShown, removedAskClaudeNotice } from "../src/config.js";
+import { claudeCodeSettings, globalConfigPath, loadConfig, removedAskClaudeNotice } from "../src/config.js";
 
 function withTempHome(fn) {
 	const oldHome = process.env.HOME;
@@ -45,7 +44,6 @@ describe("loadConfig", () => {
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
-				startupNoticeShown: undefined,
 				provider: {},
 			});
 		} finally {
@@ -66,7 +64,6 @@ describe("loadConfig", () => {
 				writeFileSync(globalPath, body);
 				const config = loadConfig(cwd);
 				assert.deepEqual(config.provider, {}, `provider for ${body}`);
-				assert.equal(config.startupNoticeShown, undefined, `startupNoticeShown for ${body}`);
 			}
 		} finally {
 			if (oldConfig === undefined) delete process.env.CLAUDE_BRIDGE_CONFIG;
@@ -104,7 +101,6 @@ describe("loadConfig", () => {
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
-				startupNoticeShown: undefined,
 				provider: { plan: "pro", strictMcpConfig: true },
 			});
 		} finally {
@@ -125,7 +121,6 @@ describe("loadConfig", () => {
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
-				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 			});
 		} finally {
@@ -147,124 +142,23 @@ describe("loadConfig", () => {
 		assert.ok(notice.includes(path), "names the file to edit");
 	}));
 
-	it("markStartupNoticeShown records today's date without dropping existing settings", () => withTempHome(() => {
+	// The removed startup notice wrote startupNoticeShown to the global config (and read it
+	// from a project's): a config that still holds it must load, the key ignored.
+	it("ignores a leftover startupNoticeShown mark", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
 			const globalDir = getAgentDir();
 			mkdirSync(globalDir, { recursive: true });
-			const path = join(globalDir, "claude-bridge.json");
-			writeFileSync(path, JSON.stringify({
+			writeFileSync(join(globalDir, "claude-bridge.json"), JSON.stringify({
+				startupNoticeShown: true,
 				provider: { strictMcpConfig: false },
 			}));
+			mkdirSync(join(cwd, CONFIG_DIR_NAME), { recursive: true });
+			writeFileSync(join(cwd, CONFIG_DIR_NAME, "claude-bridge.json"), JSON.stringify({ startupNoticeShown: "2026-01-01" }));
 
-			assert.equal(markStartupNoticeShown(), path);
-			const written = JSON.parse(readFileSync(path, "utf-8"));
-			assert.match(written.startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
-			assert.deepEqual(written.provider, { strictMcpConfig: false });
-			assert.equal(loadConfig(cwd).startupNoticeShown, written.startupNoticeShown);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-		}
-	}));
-
-	it("markStartupNoticeShown keeps a symlinked config linked and its permissions", () => withTempHome((home) => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const real = join(home, "dotfiles-claude-bridge.json");
-		writeFileSync(real, JSON.stringify({ provider: { plan: "max" } }), { mode: 0o600 });
-		chmodSync(real, 0o600);
-		const link = join(globalDir, "claude-bridge.json");
-		symlinkSync(real, link);
-
-		markStartupNoticeShown();
-
-		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
-		const written = JSON.parse(readFileSync(real, "utf-8"));
-		assert.equal(written.provider.plan, "max");
-		assert.match(written.startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
-		assert.equal(statSync(real).mode & 0o777, 0o600);
-		assert.deepEqual(readdirSync(home).filter((name) => name.endsWith(".tmp")), []);
-	}));
-
-	it("markStartupNoticeShown writes through a dangling config symlink", () => withTempHome((home) => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const real = join(home, "dotfiles-not-yet.json");
-		const link = join(globalDir, "claude-bridge.json");
-		symlinkSync(real, link);
-
-		markStartupNoticeShown();
-
-		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
-		assert.match(JSON.parse(readFileSync(real, "utf-8")).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
-	}));
-
-	it("markStartupNoticeShown follows a chain of links to a missing file", () => withTempHome((home) => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const real = join(home, "dotfiles-final.json");
-		const middle = join(home, "dotfiles-link.json");
-		symlinkSync(real, middle);
-		const link = join(globalDir, "claude-bridge.json");
-		symlinkSync(middle, link);
-
-		markStartupNoticeShown();
-
-		assert.ok(lstatSync(link).isSymbolicLink(), "the config must stay a symlink");
-		assert.ok(lstatSync(middle).isSymbolicLink(), "the link in the middle must stay a symlink");
-		assert.match(JSON.parse(readFileSync(real, "utf-8")).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
-	}));
-
-	it("markStartupNoticeShown keeps the config's mode under a restrictive umask", () => withTempHome(() => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const path = join(globalDir, "claude-bridge.json");
-		writeFileSync(path, "{}");
-		chmodSync(path, 0o644);
-		const oldUmask = process.umask(0o077);
-		try {
-			markStartupNoticeShown();
-		} finally {
-			process.umask(oldUmask);
-		}
-		assert.equal(statSync(path).mode & 0o777, 0o644);
-	}));
-
-	it("markStartupNoticeShown does not throw when the config cannot be rewritten", () => withTempHome((home) => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const lockedDir = join(home, "locked");
-		mkdirSync(lockedDir);
-		const real = join(lockedDir, "claude-bridge.json");
-		writeFileSync(real, JSON.stringify({ provider: { plan: "max" } }));
-		symlinkSync(real, join(globalDir, "claude-bridge.json"));
-		chmodSync(lockedDir, 0o500);
-		try {
-			assert.equal(markStartupNoticeShown(), join(globalDir, "claude-bridge.json"));
-			assert.deepEqual(JSON.parse(readFileSync(real, "utf-8")), { provider: { plan: "max" } });
-			assert.deepEqual(readdirSync(lockedDir), ["claude-bridge.json"]);
-		} finally {
-			chmodSync(lockedDir, 0o700);
-		}
-	}));
-
-	it("markStartupNoticeShown leaves an unparseable config untouched", () => withTempHome(() => {
-		const globalDir = getAgentDir();
-		mkdirSync(globalDir, { recursive: true });
-		const path = join(globalDir, "claude-bridge.json");
-		const malformed = '{ "provider": { "plan": "max" }, }';
-		writeFileSync(path, malformed);
-
-		markStartupNoticeShown();
-		assert.equal(readFileSync(path, "utf-8"), malformed, "a typo must not cost the user their config");
-	}));
-
-	it("markStartupNoticeShown creates the config when there is none", () => withTempHome(() => {
-		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
-		try {
-			assert.equal(loadConfig(cwd).startupNoticeShown, undefined);
-			markStartupNoticeShown();
-			assert.match(loadConfig(cwd).startupNoticeShown, /^\d{4}-\d{2}-\d{2}$/);
+			assert.deepEqual(loadConfig(cwd), {
+				provider: { strictMcpConfig: false },
+			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -281,7 +175,6 @@ describe("loadConfig", () => {
 			}));
 
 			assert.deepEqual(loadConfig(cwd), {
-				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 			});
 		} finally {

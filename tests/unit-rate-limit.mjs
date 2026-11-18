@@ -88,6 +88,58 @@ describe("consumeQuery forwarding rate_limit_event", () => {
 		assert.ok(responses.every((r) => r.served === fixtureModel));
 	});
 
+	// Recorded upstream 2026-11-10 (f14f2ed), Extra Usage on, plan at 15%: a request billed
+	// to Extra Usage while no plan window was rejected.
+	const UNPLANNED_OVERAGE = "Claude Code request billed to Extra Usage: no plan limit was reported as reached, so Anthropic may have read the system prompt as a third-party app, or this model needs usage credits on your plan";
+	const event = (rate_limit_info) => ({ type: "rate_limit_event", rate_limit_info });
+	const billed = event({ status: "allowed", resetsAt: 1796083200, rateLimitType: "overage", overageStatus: "allowed", overageResetsAt: 1796083200, isUsingOverage: false, overageInUse: true });
+	const plan = event({ status: "allowed", resetsAt: 1794298800, rateLimitType: "five_hour", overageStatus: "allowed", overageResetsAt: 1796083200, isUsingOverage: false });
+	// Plan window exhausted and served from Extra Usage: the rejection notice covers it.
+	const exhausted = event({ status: "rejected", resetsAt: 1791580200, rateLimitType: "five_hour", overageStatus: "allowed", isUsingOverage: true, overageInUse: true });
+	// Served from Extra Usage after a rejected plan window, reported without status rejected.
+	const servedFromOverage = event({ status: "allowed", rateLimitType: "five_hour", isUsingOverage: true, overageInUse: true });
+
+	async function warningsFor(messages, { model = fixtureModel, settings } = {}) {
+		const notices = [];
+		__test.setPiUI({ notify: (message, type) => notices.push({ message, type }) });
+		const previous = settings ? __test.setLongContextSettings(settings) : undefined;
+		try {
+			const c = new QueryContext();
+			c.currentPiStream = { push: () => {}, end: () => {} };
+			c.currentOnResponse = () => {};
+			c.resetTurnState(model);
+			async function* stream() { for (const m of messages) yield m; }
+			await __test.consumeQuery(stream(), new Map(), model, () => false, c);
+		} finally {
+			__test.setPiUI(null);
+			if (previous) __test.setLongContextSettings(previous);
+		}
+		return notices.filter((n) => n.message.includes("billed to Extra Usage"));
+	}
+
+	it("warns once per query when a request is billed to Extra Usage with the plan limit not reached", async () => {
+		const warnings = await warningsFor([plan, billed, billed, exhausted]);
+
+		assert.deepEqual(warnings, [{ message: UNPLANNED_OVERAGE, type: "warning" }]);
+	});
+
+	it("warns again on the next query", async () => {
+		assert.equal((await warningsFor([billed])).length, 1);
+		assert.equal((await warningsFor([billed])).length, 1);
+	});
+
+	it("does not warn when a plan window was rejected or the request is served from it", async () => {
+		assert.deepEqual(await warningsFor([plan, exhausted, servedFromOverage]), []);
+	});
+
+	it("does not warn when the user chose Extra Usage for the model's 1M context", async () => {
+		const sonnet46 = { ...fixtureModel, id: "claude-sonnet-4-6" };
+		assert.deepEqual(await warningsFor([billed], { model: sonnet46, settings: { plan: "pro", longContextExtraUsage: true } }), []);
+		// Forced to 200K, the model no longer runs on Extra Usage by choice.
+		const forced = { plan: "pro", longContextExtraUsage: true, forceTwoHundredK: ["claude-sonnet-4-6"] };
+		assert.equal((await warningsFor([billed], { model: sonnet46, settings: forced })).length, 1);
+	});
+
 	it("finishes the turn when onResponse throws", async () => {
 		const c = await replay(fixture("text"), () => { throw new Error("consumer bug"); });
 
@@ -211,5 +263,40 @@ describe("delivery to the provider call that owns the stream", () => {
 
 		assert.ok(!second.some((e) => e.startsWith("usage")), `the next query hears nothing from the aborted one: ${second}`);
 		assert.equal(second.at(-1), "done");
+	});
+
+	it("warns about unplanned Extra Usage again on the next top-level query", async () => {
+		const billed = {
+			type: "rate_limit_event",
+			rate_limit_info: { status: "allowed", rateLimitType: "overage", overageStatus: "allowed", isUsingOverage: false, overageInUse: true },
+		};
+		let queries = 0;
+		__test.setQuery(() => {
+			const id = ++queries;
+			const gen = (async function* () {
+				yield { type: "system", subtype: "init", session_id: `cc-overage-${id}` };
+				yield billed;
+				yield* textReply;
+				yield { type: "result", subtype: "success", is_error: false, result: "done" };
+			})();
+			gen.interrupt = async () => {};
+			gen.close = () => {};
+			return gen;
+		});
+		const notices = [];
+		__test.setPiUI({ notify: (message) => notices.push(message) });
+		try {
+			const first = { role: "user", content: "first prompt", timestamp: 0 };
+			await drain(providerConfig.streamSimple(model, { messages: [first], tools: [] }, { sessionId: "pi-overage" }), []);
+			const reply = { role: "assistant", content: [{ type: "text", text: "done" }],
+				api: "claude-bridge", provider: "claude-bridge", model: "claude-bridge/opus", usage: msgUsage, stopReason: "stop", timestamp: 1 };
+			const second = { role: "user", content: "second prompt", timestamp: 2 };
+			await drain(providerConfig.streamSimple(model, { messages: [first, reply, second], tools: [] }, { sessionId: "pi-overage" }), []);
+		} finally {
+			__test.setPiUI(null);
+		}
+
+		assert.equal(queries, 2, "each prompt starts its own query");
+		assert.equal(notices.filter((m) => m.includes("billed to Extra Usage")).length, 2, `one warning per query: ${notices}`);
 	});
 });
