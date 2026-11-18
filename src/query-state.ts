@@ -96,6 +96,9 @@ export class QueryContext {
 	 *  query, so a tool result pi delivers under another model is still served by
 	 *  this one, and its turn is labeled with it (upstream #273). */
 	servedModel: Model<any> | null = null;
+	/** The model of the latest switch sent to this query and not yet settled: the model
+	 *  CC will serve once it lands, so the next boundary compares against it. */
+	switchingTo: Model<any> | null = null;
 	/** pi rewrote the history this query was built from (session_compact,
 	 *  session_tree in its own pi session). Set by markRebuildForSession, consumed
 	 *  by the tool-result delivery that discards the query. Not session-wide state:
