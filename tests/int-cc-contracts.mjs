@@ -566,6 +566,25 @@ function stubApi(requests) {
  *  moves them (and a 1h ttl) between turns, so payload comparisons strip them. */
 const sansCacheControl = (m) => JSON.parse(JSON.stringify(m, (_k, v) => (v === null || v === undefined) ? v : (typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).filter(([key]) => key !== "cache_control")) : v)));
 
+// --- Picking our own turn out of the stub's requests ---
+
+// The claude_code preset's identity line. Without the preset CC still sends a
+// short SDK identity line ("You are a Claude agent, built on ...") and the
+// billing header, so only this line and the preset's size tell the two apart.
+const PRESET_ANCHOR = "You are Claude Code, Anthropic's official CLI for Claude";
+/** Concatenated text of a request's `system` (a string or text blocks). */
+const systemText = (body) => typeof body.system === "string" ? body.system : (body.system ?? []).map((b) => b.text ?? "").join("\n");
+/** The request for our own turn, whose last block is exactly `prompt`. Other
+ *  requests reach the stub too: CC's background session-title request quotes the
+ *  prompt inside a <session> wrapper, and a user hook that runs a model inherits
+ *  ANTHROPIC_BASE_URL. So never take requests.at(-1); give each turn a unique
+ *  prompt and pick it out by that. */
+const turnRequest = (requests, prompt) => requests.filter((b) => {
+	const last = b.messages.at(-1);
+	const text = Array.isArray(last?.content) ? last.content.at(-1)?.text : last?.content;
+	return last?.role === "user" && text === prompt;
+}).at(-1);
+
 // --- Native instruction exclusions ---
 
 test("claudeMdExcludes prevents native AGENTS.md from duplicating forwarded instructions", { timeout: 120_000 }, async () => {
@@ -576,8 +595,9 @@ test("claudeMdExcludes prevents native AGENTS.md from duplicating forwarded inst
 	writeFileSync(join(cwd, "AGENTS.md"), marker);
 	try {
 		for (const excluded of [false, true]) {
+			const prompt = `Reply OK (${randomUUID()}).`;
 			const { result } = await collect(query({
-				prompt: "Reply OK.",
+				prompt,
 				options: providerOptions({
 					cwd, maxTurns: 1, persistSession: false,
 					env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
@@ -586,8 +606,8 @@ test("claudeMdExcludes prevents native AGENTS.md from duplicating forwarded inst
 				}),
 			}));
 			assert.equal(result?.subtype, "success");
-			const request = requests.at(-1);
-			assert.ok(request, "CC sent no request");
+			const request = turnRequest(requests, prompt);
+			assert.ok(request, "CC sent no request for this turn");
 			const system = JSON.stringify(request.system);
 			const messages = JSON.stringify(request.messages);
 			assert.equal(system.split(marker).length - 1, 1, "forwarded instructions must remain");
@@ -596,6 +616,81 @@ test("claudeMdExcludes prevents native AGENTS.md from duplicating forwarded inst
 		}
 	} finally {
 		api.close();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// --- Forwarding pi's system prompt ---
+
+test("systemPrompt: a plain string replaces the claude_code preset; the preset form sends preset plus append", { timeout: 120_000 }, async () => {
+	// src/index.ts sends pi's whole prompt as the preset's append by default, and
+	// alone as a plain string with provider.systemPromptPreset false (README).
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-system-prompt-"));
+	const marker = `PI-WHOLE-PROMPT-${randomUUID()}`;
+	const env = { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	try {
+		const run = async (systemPrompt, prompt) => {
+			const { result } = await collect(query({ prompt, options: providerOptions({ cwd, maxTurns: 1, persistSession: false, env, systemPrompt }) }));
+			assert.equal(result?.subtype, "success");
+			const body = turnRequest(requests, prompt);
+			assert.ok(body, "CC sent no request for this turn");
+			return systemText(body);
+		};
+		const plain = await run(`${marker} You answer briefly.`, `Reply OK (plain ${randomUUID()}).`);
+		assert.ok(plain.includes(marker), "a plain-string systemPrompt did not reach the request's system");
+		assert.ok(!plain.includes(PRESET_ANCHOR), "a plain-string systemPrompt still carried the claude_code preset");
+		assert.ok(plain.length < 1_000, `a plain-string systemPrompt grew to ${plain.length} chars — CC added more than its identity line`);
+
+		const preset = await run({ type: "preset", preset: "claude_code", append: marker }, `Reply OK (preset ${randomUUID()}).`);
+		assert.ok(preset.includes(PRESET_ANCHOR), "the claude_code preset is missing — re-point PRESET_ANCHOR if CC reworded it");
+		assert.equal(preset.split(marker).length - 1, 1, "the preset's append did not reach the request's system once");
+		assert.ok(preset.indexOf(PRESET_ANCHOR) < preset.indexOf(marker), "the append no longer follows the preset");
+		assert.ok(preset.length > 5_000, `the claude_code preset shrank to ${preset.length} chars`);
+	} finally {
+		api.close();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("systemPrompt: a resumed session re-sends the prompt it was created with, ignoring a new one", { timeout: 120_000 }, async () => {
+	// CC records the system prompt in the session JSONL on the session's first
+	// run (attachment + api-request-shape records) and replays it on every
+	// --resume, whatever systemPrompt the resuming query passes; plain strings
+	// behave the same. Only a fresh import records a new prompt. This is why the
+	// bridge rebuilds CC's session from pi's history when the prompt it would
+	// send (preset setting + whole prompt) changes, instead of resuming
+	// (src/index.ts promptDigest, odd/tasks/forward-whole-system-prompt.md S4).
+	// If this starts failing because the new append arrives, the rebuild on a
+	// prompt change has become unnecessary.
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-system-prompt-resume-"));
+	const oldAppend = `PI-OLD-PROMPT-${randomUUID()}`;
+	const newAppend = `PI-NEW-PROMPT-${randomUUID()}`;
+	const firstPrompt = `Reply OK (first ${randomUUID()}).`;
+	const resumedPrompt = `Reply OK (resumed ${randomUUID()}).`;
+	const env = { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+	const opts = (append, extra = {}) => providerOptions({ cwd, maxTurns: 1, env, systemPrompt: { type: "preset", preset: "claude_code", append }, ...extra });
+	let sessionId;
+	try {
+		const first = await collect(query({ prompt: firstPrompt, options: opts(oldAppend) }));
+		assert.equal(first.result?.subtype, "success");
+		sessionId = first.result.session_id;
+		assert.ok(systemText(turnRequest(requests, firstPrompt)).includes(oldAppend), "the first turn did not carry its append");
+
+		const second = await collect(query({ prompt: resumedPrompt, options: opts(newAppend, { resume: sessionId }) }));
+		assert.equal(second.result?.subtype, "success");
+		const body = turnRequest(requests, resumedPrompt);
+		assert.ok(body, "the resumed query never reached the stub API");
+		assert.ok(JSON.stringify(body.messages).includes(firstPrompt), "the resumed request lost the first turn — not a real resume");
+		const system = systemText(body);
+		assert.ok(system.includes(oldAppend), "a resumed session no longer re-sends the prompt it was created with — the bridge's rebuild on a prompt change may be unnecessary");
+		assert.ok(!system.includes(newAppend), "a resumed session now sends the new prompt — the bridge's rebuild on a prompt change may be unnecessary");
+	} finally {
+		api.close();
+		if (sessionId) deleteSession(sessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
@@ -646,7 +741,7 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 		// the bridge's rebuild path re-invokes fresh and recomputes it — the shape
 		// where the break lives.
 		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
-		const ctrlFirst = requests.at(-1);
+		const ctrlFirst = presetReqs().at(-1);
 		assert.ok(JSON.stringify(ctrlFirst).includes("gitStatus"),
 			"the preset no longer carries a gitStatus block — this test's negative side is obsolete");
 		writeFileSync(join(repo, "ctrl-new.txt"), "x\n");
