@@ -1987,6 +1987,10 @@ type SettingsQuery = { setModel?: (m?: string) => Promise<void>; applyFlagSettin
  *  effort is not tried again in this query, and the next prompt's fresh query starts
  *  with it anyway. */
 async function applyRunningEffort(c: QueryContext, q: SettingsQuery, cliModel: string, effort: EffortLevel | null): Promise<void> {
+	if (c.refusedEfforts.has(`${cliModel}:${effort ?? "default"}`)) {
+		debug(`provider: effort ${effort ?? "default"} for ${cliModel} was refused earlier in this query, query keeps ${c.servedEffort ?? "default"} until the next prompt`);
+		return;
+	}
 	try {
 		if (!q?.applyFlagSettings) throw new Error("the query cannot set its effort");
 		await q.applyFlagSettings({ effortLevel: effort });
@@ -2052,7 +2056,6 @@ async function changeRunningEffort(c: QueryContext, model: Model<any>, effort: E
 		// The effort was computed for `model`: a switch to it refused meanwhile leaves the
 		// query on another model, which keeps its own effort until the next prompt.
 		if (c.servedModel && claudeCodeModelId(c.servedModel, longContextSettings) !== cliModel) return;
-		if (c.refusedEfforts.has(`${cliModel}:${effort ?? "default"}`)) return;
 		const from = c.servedEffort;
 		await applyRunningEffort(c, q, cliModel, effort);
 		if (c.servedEffort === effort) debug(`provider: set the running query's effort from ${from ?? "default"} to ${effort ?? "default"} at a tool result`);

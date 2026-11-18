@@ -481,6 +481,32 @@ it("does not set the effort computed for a model whose pending switch is then re
 	assert.equal(continued.model, haiku.id, "labeled with the model that served it");
 });
 
+it("does not try an effort refused on a model again when a switch comes back to that model", async () => {
+	// Fable 5.2 at "high"; "medium" is refused on it at the first tool result. The query then
+	// switches to Fable 5.1 and back to Fable 5.2, both at "medium".
+	flagFails = true;
+	secondTool = true;
+	thirdTool = true;
+	const [a, b] = [byId("claude-fable-5-2"), byId("claude-fable-5-1")];
+	const at = (reasoning) => ({ sessionId: "pi-effort-refused-back", reasoning, signal: new AbortController().signal });
+	const ask = user("read a");
+	const parked = await streamSimple(a, { messages: [ask], tools }, at("high")).result();
+	const deliver = async (model, messages, id, go) => {
+		const s = streamSimple(model, { messages, tools }, at("medium"));
+		for (let i = 0; i < 200 && !ctx().pendingResults.has(id); i++) await new Promise((r) => setTimeout(r, 5));
+		go();
+		return s.result();
+	};
+	const parked2 = await deliver(a, [ask, parked, toolResult], "toolu_1", () => release());
+	const parked3 = await deliver(b, [ask, parked, toolResult, parked2, secondResult], "toolu_2", () => release2());
+	const thirdResult = { role: "toolResult", toolCallId: "toolu_3", toolName: "read", content: [{ type: "text", text: "MARKER_3" }], isError: false, timestamp: clock++ };
+	const continued = await deliver(a, [ask, parked, toolResult, parked2, secondResult, parked3, thirdResult], "toolu_3", () => release3());
+	assert.equal(continued.content.find((blk) => blk.type === "text")?.text, "continued");
+	assert.equal(setModels.length, 2, "switched to Fable 5.1 and back");
+	assert.deepEqual(flagSettings.map((f) => [f.settings.effortLevel, f.afterSetModels]), [["medium", 0], ["medium", 1]],
+		"medium was tried on Fable 5.2 and on Fable 5.1, not again on Fable 5.2");
+});
+
 it("does not try a refused effort again at the next tool result; the next prompt starts with it", async () => {
 	flagFails = true;
 	secondTool = true;
