@@ -67,6 +67,8 @@ let thirdTool = false;
 let pauseAfterStartMs = 0;
 let setModelFails = false;
 let setModelDelayMs = 5;
+/** When set, setModel waits for it instead of setModelDelayMs (a test settles it). */
+let setModelGate = null;
 /** Results the bridge had handed the query when each setModel call was made. */
 const resultsAtSwitch = [];
 beforeEach(() => {
@@ -80,6 +82,7 @@ beforeEach(() => {
 	flagFails = false;
 	setModelFails = false;
 	setModelDelayMs = 5;
+	setModelGate = null;
 	secondTool = false;
 	thirdTool = false;
 	pauseAfterStartMs = 0;
@@ -119,7 +122,7 @@ beforeEach(() => {
 			}
 		})();
 		gen.setModel = async (m) => {
-			await new Promise((r) => setTimeout(r, setModelDelayMs));
+			await (setModelGate ?? new Promise((r) => setTimeout(r, setModelDelayMs)));
 			setModels.push(m);
 			resultsAtSwitch.push(ctx().pendingResults.size);
 			if (setModelFails) throw new Error("setModel refused");
@@ -453,7 +456,8 @@ it("does not set the effort computed for a model whose pending switch is then re
 	// Haiku 5.5 to Opus 5.5 at "high" (same thinking settings); the switch outlasts the
 	// wait and is refused, and pi asks Opus at "medium" at the next tool result.
 	mod.__test.setSwitchModelWaitMs(20);
-	setModelDelayMs = 300;
+	let refuse;
+	setModelGate = new Promise((r) => { refuse = r; });
 	setModelFails = true;
 	secondTool = true;
 	const [haiku, opus] = [byId("claude-haiku-5-5"), byId("claude-opus-5-5")];
@@ -465,8 +469,11 @@ it("does not set the effort computed for a model whose pending switch is then re
 	release();
 	const parked2 = await toOpus.result();
 	const medium = streamSimple(opus, { messages: [ask, parked, toolResult, parked2, secondResult], tools }, opts("medium"));
+	for (let i = 0; i < 200 && !ctx().pendingResults.has("toolu_2"); i++) await new Promise((r) => setTimeout(r, 5));
 	assert.equal(setModels.length, 0, "the switch to Opus is still pending at the second tool result");
-	await new Promise((r) => setTimeout(r, 400)); // the switch is refused, the chained effort change settles
+	refuse();
+	for (let i = 0; i < 200 && setModels.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+	await new Promise((r) => setTimeout(r, 20)); // the chained effort change settles after the refusal
 	release2();
 	const continued = await medium.result();
 	assert.equal(setModels.length, 1, "the switch was attempted once");
