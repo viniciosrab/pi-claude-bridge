@@ -264,4 +264,39 @@ describe("delivery to the provider call that owns the stream", () => {
 		assert.ok(!second.some((e) => e.startsWith("usage")), `the next query hears nothing from the aborted one: ${second}`);
 		assert.equal(second.at(-1), "done");
 	});
+
+	it("warns about unplanned Extra Usage again on the next top-level query", async () => {
+		const billed = {
+			type: "rate_limit_event",
+			rate_limit_info: { status: "allowed", rateLimitType: "overage", overageStatus: "allowed", isUsingOverage: false, overageInUse: true },
+		};
+		let queries = 0;
+		__test.setQuery(() => {
+			const id = ++queries;
+			const gen = (async function* () {
+				yield { type: "system", subtype: "init", session_id: `cc-overage-${id}` };
+				yield billed;
+				yield* textReply;
+				yield { type: "result", subtype: "success", is_error: false, result: "done" };
+			})();
+			gen.interrupt = async () => {};
+			gen.close = () => {};
+			return gen;
+		});
+		const notices = [];
+		__test.setPiUI({ notify: (message) => notices.push(message) });
+		try {
+			const first = { role: "user", content: "first prompt", timestamp: 0 };
+			await drain(providerConfig.streamSimple(model, { messages: [first], tools: [] }, { sessionId: "pi-overage" }), []);
+			const reply = { role: "assistant", content: [{ type: "text", text: "done" }],
+				api: "claude-bridge", provider: "claude-bridge", model: "claude-bridge/opus", usage: msgUsage, stopReason: "stop", timestamp: 1 };
+			const second = { role: "user", content: "second prompt", timestamp: 2 };
+			await drain(providerConfig.streamSimple(model, { messages: [first, reply, second], tools: [] }, { sessionId: "pi-overage" }), []);
+		} finally {
+			__test.setPiUI(null);
+		}
+
+		assert.equal(queries, 2, "each prompt starts its own query");
+		assert.equal(notices.filter((m) => m.includes("billed to Extra Usage")).length, 2, `one warning per query: ${notices}`);
+	});
 });

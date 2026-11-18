@@ -2283,6 +2283,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	claimCurrentPiStream(stream, "fresh-query", queryCtx, options);
 	// A held event belongs to the query that received it, not to this request.
 	queryCtx.heldRateLimit = undefined;
+	// The Extra Usage warning is once per query: a fresh query on a reused
+	// top-level context warns again (tool-result continuations share it).
+	queryCtx.warnedUnplannedOverage = false;
 	queryCtx.pendingToolCalls.clear();
 	queryCtx.pendingResults.clear();
 	queryCtx.pendingSteerUuids.clear();
