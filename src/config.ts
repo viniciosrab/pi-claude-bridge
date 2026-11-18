@@ -73,6 +73,18 @@ export function systemPromptPresetEnabled(provider: Config["provider"] = {}): bo
 	return provider.systemPromptPreset !== false && provider.systemPromptPreset !== null;
 }
 
+// Warnings already printed, process-wide: the config is loaded again on every
+// compaction and branch summary, and a module instance a worktree subagent loads
+// fresh would print its own copy. A different value (the user edited it) is new.
+const WARNED_KEY = Symbol.for("claude-bridge:configWarnings");
+function warnOnce(message: string): void {
+	const g = globalThis as Record<symbol, Set<string> | undefined>;
+	const warned = (g[WARNED_KEY] ??= new Set());
+	if (warned.has(message)) return;
+	warned.add(message);
+	console.error(message);
+}
+
 export function loadConfig(): Config {
 	const global = tryParseJson(globalConfigPath());
 	const provider = { ...global.provider };
@@ -80,7 +92,7 @@ export function loadConfig(): Config {
 	// Reported and dropped rather than thrown: the extension always starts, and an unknown
 	// value keeps the default, the preset on.
 	if (preset !== undefined && preset !== null && typeof preset !== "boolean" && preset !== "claude_code") {
-		console.error(`claude-bridge: ignoring provider.systemPromptPreset ${JSON.stringify(preset)} in ${globalConfigPath()}: use true (default) or false`);
+		warnOnce(`claude-bridge: ignoring provider.systemPromptPreset ${JSON.stringify(preset)} in ${globalConfigPath()}: use true (default) or false`);
 		delete provider.systemPromptPreset;
 	}
 	return { provider };

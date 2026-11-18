@@ -71,6 +71,21 @@ describe("loadConfig", () => {
 		}
 	}));
 
+	it("reports an invalid systemPromptPreset once, though the config is loaded again on every compaction", () => withTempHome(() => {
+		mkdirSync(getAgentDir(), { recursive: true });
+		const originalError = console.error;
+		const errors = [];
+		console.error = (...args) => errors.push(args.join(" "));
+		try {
+			writeFileSync(join(getAgentDir(), "claude-bridge.json"), JSON.stringify({ provider: { systemPromptPreset: "once-only" } }));
+			assert.deepEqual(loadConfig(), { provider: {} });
+			assert.deepEqual(loadConfig(), { provider: {} }, "still dropped on the second load");
+			assert.equal(errors.filter((e) => e.includes("systemPromptPreset")).length, 1, "one warning for two loads");
+		} finally {
+			console.error = originalError;
+		}
+	}));
+
 	it("ignores a project's provider config", () => withTempHome(() => {
 		const cwd = mkdtempSync(join(tmpdir(), "claude-bridge-project-"));
 		try {
