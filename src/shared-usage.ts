@@ -1,9 +1,9 @@
 // Plan usage shared across pi processes. A subagent runs in its own `pi` process,
 // so the rate_limit_events its Claude Code reports reach only that process's
 // onResponse: the parent's usage bar stood still until the parent's own next
-// request. Every bridge writes its latest event to one file under pi's agent
-// dir; the interactive parent watches that file and re-registers a usage source
-// with Gentle Shell, which refreshes the bar from it at once.
+// request. Every bridge writes its latest event to its account's file under pi's
+// agent dir; the interactive parent watches its account's file and re-registers a
+// usage source with Gentle Shell, which refreshes the bar from it at once.
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createHash } from "crypto";
@@ -24,7 +24,7 @@ const WINDOWS: ReadonlyArray<[name: string, label: string, seconds: number]> = [
 	["seven_day", "week", 604_800],
 ];
 
-type SharedUsage = { version: number; account: string; at: number; info: RateLimitInfo };
+type SharedUsage = { version: number; at: number; info: RateLimitInfo };
 
 type UsageWindow = { label: string; usedPercent: number; windowSeconds: number; resetAt: number | null };
 export type ProviderUsage = {
@@ -34,16 +34,17 @@ export type ProviderUsage = {
 	fetchedAt: number;
 };
 
-export function sharedUsagePath(): string {
-	return join(getAgentDir(), "claude-bridge-usage.json");
-}
-
-/** Which Claude account the snapshot belongs to: pi-claude-accounts selects it per
+/** Which Claude account a snapshot belongs to: pi-claude-accounts selects it per
  *  process through CLAUDE_CODE_OAUTH_TOKEN, so a parent and a subagent can differ.
- *  Hashed, so the token itself never reaches the file. */
+ *  Hashed, so the token itself never reaches the disk. */
 export function accountKey(env: NodeJS.ProcessEnv = process.env): string {
 	const token = env.CLAUDE_CODE_OAUTH_TOKEN;
 	return token ? createHash("sha256").update(token).digest("hex").slice(0, 16) : "login";
+}
+
+/** One file per account, so one account's report never replaces another's. */
+export function sharedUsagePath(account = accountKey()): string {
+	return join(getAgentDir(), `claude-bridge-usage-${account}.json`);
 }
 
 /** Atomic (write then rename), so a reader never sees half a file. Best effort: the
@@ -53,7 +54,7 @@ export function publishUsage(info: RateLimitInfo, now = Date.now()): void {
 	const temp = `${path}.${process.pid}.tmp`;
 	try {
 		mkdirSync(dirname(path), { recursive: true });
-		const snapshot: SharedUsage = { version: FILE_VERSION, account: accountKey(), at: now, info };
+		const snapshot: SharedUsage = { version: FILE_VERSION, at: now, info };
 		writeFileSync(temp, JSON.stringify(snapshot));
 		renameSync(temp, path);
 	} catch {
@@ -64,7 +65,7 @@ export function publishUsage(info: RateLimitInfo, now = Date.now()): void {
 function readSharedUsage(): SharedUsage | undefined {
 	try {
 		const raw = JSON.parse(readFileSync(sharedUsagePath(), "utf8"));
-		if (raw?.version !== FILE_VERSION || typeof raw.account !== "string" || typeof raw.at !== "number" || !raw.info || typeof raw.info !== "object") return undefined;
+		if (raw?.version !== FILE_VERSION || typeof raw.at !== "number" || !raw.info || typeof raw.info !== "object") return undefined;
 		return raw as SharedUsage;
 	} catch {
 		return undefined;
@@ -88,8 +89,7 @@ export function toProviderUsage(info: RateLimitInfo, provider: string, fetchedAt
 /** The latest shared snapshot of this process's account, as the provider's usage. */
 export function sharedProviderUsage(provider: string): ProviderUsage | undefined {
 	const shared = readSharedUsage();
-	if (!shared || shared.account !== accountKey()) return undefined;
-	return toProviderUsage(shared.info, provider, shared.at);
+	return shared && toProviderUsage(shared.info, provider, shared.at);
 }
 
 export function usageSource(provider: string) {
@@ -100,25 +100,26 @@ export function usageSource(provider: string) {
 	};
 }
 
-/** Calls onUpdate once per burst of new snapshots of this process's account. Watches
- *  the directory, not the file: each publish replaces the file's inode. */
+/** Calls onUpdate once per burst of new snapshots of this process's account, read
+ *  when the event comes, since pi-claude-accounts can switch it. Watches the
+ *  directory, not the file: each publish replaces the file's inode. */
 export function watchSharedUsage(onUpdate: () => void): () => void {
-	const path = sharedUsagePath();
-	const name = basename(path);
-	let lastAt = readSharedUsage()?.at ?? 0;
+	const dir = dirname(sharedUsagePath());
+	const lastAt = new Map<string, number>([[accountKey(), readSharedUsage()?.at ?? 0]]);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let watcher: FSWatcher | undefined;
 	const check = () => {
 		timer = undefined;
+		const account = accountKey();
 		const shared = readSharedUsage();
-		if (!shared || shared.at <= lastAt || shared.account !== accountKey()) return;
-		lastAt = shared.at;
+		if (!shared || shared.at <= (lastAt.get(account) ?? 0)) return;
+		lastAt.set(account, shared.at);
 		try { onUpdate(); } catch { /* a listener never breaks the watcher */ }
 	};
 	try {
-		mkdirSync(dirname(path), { recursive: true });
-		watcher = watch(dirname(path), { persistent: false }, (_event, filename) => {
-			if (filename !== null && filename.toString() !== name) return;
+		mkdirSync(dir, { recursive: true });
+		watcher = watch(dir, { persistent: false }, (_event, filename) => {
+			if (filename !== null && filename.toString() !== basename(sharedUsagePath())) return;
 			if (timer) return;
 			timer = setTimeout(check, WATCH_DEBOUNCE_MS);
 			timer.unref?.();

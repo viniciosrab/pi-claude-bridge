@@ -4,7 +4,8 @@
  */
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { QueryContext } from "../src/query-state.js";
 import { USAGE_SOURCE_EVENT, publishUsage, sharedProviderUsage, sharedUsagePath } from "../src/shared-usage.js";
 
@@ -42,8 +43,20 @@ const expected = (fetchedAt) => ({
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 
+/** Publishes as a process on another account would, leaving this process on its own. */
+function publishAs(account, usage, at) {
+	const own = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+	process.env.CLAUDE_CODE_OAUTH_TOKEN = account;
+	try { publishUsage(usage, at); }
+	finally {
+		if (own === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+		else process.env.CLAUDE_CODE_OAUTH_TOKEN = own;
+	}
+}
+
 afterEach(() => {
-	rmSync(sharedUsagePath(), { force: true });
+	const dir = dirname(sharedUsagePath());
+	for (const name of readdirSync(dir)) if (name.startsWith("claude-bridge-usage-")) rmSync(join(dir, name), { force: true });
 	if (token === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 	else process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
 });
@@ -104,9 +117,10 @@ describe("shared plan usage", () => {
 			assert.deepEqual(usage, expected(usage.fetchedAt));
 
 			// Another account's report, from a process on another token, is not this bar's.
-			writeFileSync(sharedUsagePath(), JSON.stringify({ version: 1, account: "0123456789abcdef", at: Date.now() + 1, info }));
+			publishAs("another-account", info, Date.now() + 1);
 			await sleep(500);
 			assert.equal(pi.emitted.length, 1);
+			assert.deepEqual(await payload.fetch(undefined, fetch, Date.now()), usage);
 		} finally {
 			pi.shutdown("tui");
 		}
@@ -114,6 +128,22 @@ describe("shared plan usage", () => {
 		publishUsage(info, Date.now() + 2);
 		await sleep(500);
 		assert.equal(pi.emitted.length, 1, "a shut-down session stops watching");
+	});
+
+	it("keeps this account's report when another account publishes right after it", async () => {
+		const pi = activated();
+		pi.start("tui");
+		try {
+			const at = Date.now();
+			publishUsage(info, at);
+			publishAs("another-account", { ...info, unifiedWindows: { five_hour: { utilization: 0.99, resetsAt: 1789770600 } } }, at + 1);
+			await sleep(500);
+
+			assert.equal(pi.emitted.length, 1);
+			assert.deepEqual(await pi.emitted[0].payload.fetch(undefined, fetch, Date.now()), expected(at));
+		} finally {
+			pi.shutdown("tui");
+		}
 	});
 
 	it("does not watch from a subagent's rpc process", async () => {
