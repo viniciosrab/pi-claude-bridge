@@ -86,10 +86,43 @@ export function toProviderUsage(info: RateLimitInfo, provider: string, fetchedAt
 	return { provider, plan: undefined, limits: [{ name: "claude", windows, limitReached: info.status === "rejected" }], fetchedAt };
 }
 
-/** The latest shared snapshot of this process's account, as the provider's usage. */
+/** Highest utilization seen per account, window and resetsAt, in this process. */
+const highWater = new Map<string, number>();
+
+/** info with each window's utilization raised to the highest seen for the same window
+ *  and resetsAt: every process measures at response start but reports after it, so a
+ *  later report can carry an older measurement. A new resetsAt starts over. */
+function raiseToHighWater(info: RateLimitInfo, account: string, floor?: RateLimitInfo): RateLimitInfo {
+	if (!info.unifiedWindows) return info;
+	const windows: NonNullable<RateLimitInfo["unifiedWindows"]> = {};
+	for (const [name, window] of Object.entries(info.unifiedWindows)) {
+		// No reset time: nothing tells one window from the next, so keep no maximum.
+		if (typeof window?.utilization !== "number" || !Number.isFinite(window.utilization)
+			|| typeof window.resetsAt !== "number" || !Number.isFinite(window.resetsAt)) {
+			windows[name] = window;
+			continue;
+		}
+		const key = `${account}\0${name}\0${window.resetsAt}`;
+		const other = floor?.unifiedWindows?.[name];
+		const fromFloor = other?.resetsAt === window.resetsAt && typeof other.utilization === "number" && Number.isFinite(other.utilization) ? other.utilization : -Infinity;
+		const utilization = Math.max(window.utilization, fromFloor, highWater.get(key) ?? -Infinity);
+		highWater.set(key, utilization);
+		windows[name] = { ...window, utilization };
+	}
+	return { ...info, unifiedWindows: windows };
+}
+
+/** The info to publish and report: never below this account's shared file or this
+ *  process's high-water mark within the same window. */
+export function monotonicUsage(info: RateLimitInfo): RateLimitInfo {
+	return raiseToHighWater(info, accountKey(), readSharedUsage()?.info);
+}
+
+/** The latest shared snapshot of this process's account, as the provider's usage.
+ *  Raised to the high-water mark, so a race between two writers never lowers the bar. */
 export function sharedProviderUsage(provider: string): ProviderUsage | undefined {
 	const shared = readSharedUsage();
-	return shared && toProviderUsage(shared.info, provider, shared.at);
+	return shared && toProviderUsage(raiseToHighWater(shared.info, accountKey()), provider, shared.at);
 }
 
 export function usageSource(provider: string) {

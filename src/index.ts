@@ -28,7 +28,7 @@ import { nonSystemMessages, toBridgeContext } from "./transcript.js";
 import { forgetSessionCwd, rememberSessionCwd, rememberSummarySession, sessionCwdFor, summarySessionFor } from "./session-cwd.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
 import { rateLimitResponse } from "./rate-limit.js";
-import { USAGE_SOURCE_EVENT, publishUsage, usageSource, watchSharedUsage } from "./shared-usage.js";
+import { USAGE_SOURCE_EVENT, monotonicUsage, publishUsage, usageSource, watchSharedUsage } from "./shared-usage.js";
 
 // --- Debug logging ---
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to the bridge log in pi's agent
@@ -592,7 +592,8 @@ async function reportHeldRateLimit(c: QueryContext, model: Model<any>): Promise<
 	if (!info || !c.currentPiStream || !c.currentOnResponse) return;
 	c.heldRateLimit = undefined;
 	try {
-		await c.currentOnResponse(rateLimitResponse(info), model);
+		// Held while the stream was closed: a subagent may have reported more since.
+		await c.currentOnResponse(rateLimitResponse(monotonicUsage(info)), model);
 	} catch (error) {
 		debug("rate limit: onResponse failed", error);
 	}
@@ -1848,9 +1849,11 @@ async function consumeQuery(
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
 			if (info) {
-				queryCtx.heldRateLimit = info;
+				// Usage only: warnings and rejection below read the event as Claude Code sent it.
+				const usage = monotonicUsage(info);
+				queryCtx.heldRateLimit = usage;
 				// A subagent's own process: the parent's usage bar learns of it only this way.
-				publishUsage(info);
+				publishUsage(usage);
 			}
 			await reportHeldRateLimit(queryCtx, served);
 			// CC sets isUsingOverage only when a rejected plan window is served from Extra

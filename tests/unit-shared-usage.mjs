@@ -146,6 +146,80 @@ describe("shared plan usage", () => {
 		}
 	});
 
+	describe("within one usage window", () => {
+		/** Five-hour usage only, so each test can pick its own window (the high-water mark is per process). */
+		const fiveHour = (utilization, resetsAt) => ({
+			status: "allowed", resetsAt, rateLimitType: "five_hour",
+			unifiedWindows: { five_hour: { utilization, resetsAt } },
+		});
+		const percent = () => sharedProviderUsage("claude-bridge")?.limits[0].windows[0].usedPercent;
+
+		/** Drives one rate_limit_event through consumeQuery, returning the 5h header pi's onResponse got. */
+		async function report(usage) {
+			const headers = [];
+			const c = new QueryContext();
+			c.currentPiStream = { push: () => {}, end: () => {} };
+			c.currentOnResponse = (r) => { headers.push(r.headers["anthropic-ratelimit-unified-5h-utilization"]); };
+			c.resetTurnState(model);
+			async function* stream() { yield { type: "rate_limit_event", rate_limit_info: usage }; }
+			await __test.consumeQuery(stream(), new Map(), model, () => false, c);
+			return headers;
+		}
+
+		it("never moves backwards when a report carrying an older measurement arrives later", async () => {
+			const resetsAt = 1789780000;
+			// Another process reports 82% first; this one's report, measured earlier, arrives after.
+			publishUsage(fiveHour(0.82, resetsAt), Date.now());
+
+			assert.deepEqual(await report(fiveHour(0.81, resetsAt)), ["0.82"]);
+			assert.equal(percent(), 82);
+
+			assert.deepEqual(await report(fiveHour(0.85, resetsAt)), ["0.85"]);
+			assert.equal(percent(), 85);
+		});
+
+		it("raises held usage to the current maximum when it is finally delivered", async () => {
+			const resetsAt = 1789800000;
+			const headers = [];
+			const c = new QueryContext();
+			c.resetTurnState(model);
+			// The parent's stream is closed (parked on a tool): its 81% is held.
+			async function* held() { yield { type: "rate_limit_event", rate_limit_info: fiveHour(0.81, resetsAt) }; }
+			await __test.consumeQuery(held(), new Map(), model, () => false, c);
+			// Meanwhile a subagent reports 85%.
+			publishUsage(fiveHour(0.85, resetsAt), Date.now());
+			// The tool returns and the next stream opens: the held report goes out now.
+			c.currentPiStream = { push: () => {}, end: () => {} };
+			c.currentOnResponse = (r) => { headers.push(r.headers["anthropic-ratelimit-unified-5h-utilization"]); };
+			async function* next() { yield { type: "stream_event", event: { type: "ping" } }; }
+			await __test.consumeQuery(next(), new Map(), model, () => false, c);
+
+			assert.deepEqual(headers, ["0.85"]);
+		});
+
+		it("keeps no maximum for a window reported without a reset time", async () => {
+			const noReset = (utilization) => ({ status: "allowed", rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization } } });
+			assert.deepEqual(await report(noReset(0.9)), ["0.9"]);
+			assert.deepEqual(await report(noReset(0.03)), ["0.03"]);
+		});
+
+		it("never shows less than this process has seen, even when another writer lowers the file", async () => {
+			const resetsAt = 1789790000;
+			await report(fiveHour(0.6, resetsAt));
+			publishUsage(fiveHour(0.55, resetsAt), Date.now());
+
+			assert.equal(percent(), 60);
+		});
+
+		it("takes a new window's lower value after a reset", async () => {
+			publishUsage(fiveHour(0.82, 1789800000), Date.now());
+			await report(fiveHour(0.82, 1789800000));
+
+			assert.deepEqual(await report(fiveHour(0.03, 1789818000)), ["0.03"]);
+			assert.equal(percent(), 3);
+		});
+	});
+
 	it("does not watch from a subagent's rpc process", async () => {
 		const pi = activated();
 		pi.start("rpc");
