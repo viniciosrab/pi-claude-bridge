@@ -96,7 +96,9 @@ function raiseToHighWater(info: RateLimitInfo, account: string, floor?: RateLimi
 	if (!info.unifiedWindows) return info;
 	const windows: NonNullable<RateLimitInfo["unifiedWindows"]> = {};
 	for (const [name, window] of Object.entries(info.unifiedWindows)) {
-		if (typeof window?.utilization !== "number" || !Number.isFinite(window.utilization)) {
+		// No reset time: nothing tells one window from the next, so keep no maximum.
+		if (typeof window?.utilization !== "number" || !Number.isFinite(window.utilization)
+			|| typeof window.resetsAt !== "number" || !Number.isFinite(window.resetsAt)) {
 			windows[name] = window;
 			continue;
 		}

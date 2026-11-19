@@ -592,7 +592,8 @@ async function reportHeldRateLimit(c: QueryContext, model: Model<any>): Promise<
 	if (!info || !c.currentPiStream || !c.currentOnResponse) return;
 	c.heldRateLimit = undefined;
 	try {
-		await c.currentOnResponse(rateLimitResponse(info), model);
+		// Held while the stream was closed: a subagent may have reported more since.
+		await c.currentOnResponse(rateLimitResponse(monotonicUsage(info)), model);
 	} catch (error) {
 		debug("rate limit: onResponse failed", error);
 	}
