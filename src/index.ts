@@ -28,6 +28,7 @@ import { nonSystemMessages, toBridgeContext } from "./transcript.js";
 import { forgetSessionCwd, rememberSessionCwd, rememberSummarySession, sessionCwdFor, summarySessionFor } from "./session-cwd.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
 import { rateLimitResponse } from "./rate-limit.js";
+import { USAGE_SOURCE_EVENT, publishUsage, usageSource, watchSharedUsage } from "./shared-usage.js";
 
 // --- Debug logging ---
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to the bridge log in pi's agent
@@ -1846,7 +1847,11 @@ async function consumeQuery(
 		if (message.type === "rate_limit_event") {
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
-			if (info) queryCtx.heldRateLimit = info;
+			if (info) {
+				queryCtx.heldRateLimit = info;
+				// A subagent's own process: the parent's usage bar learns of it only this way.
+				publishUsage(info);
+			}
 			await reportHeldRateLimit(queryCtx, served);
 			// CC sets isUsingOverage only when a rejected plan window is served from Extra
 			// Usage; overageInUse alone means the request was billed there anyway.
@@ -2971,7 +2976,12 @@ export default function (pi: ExtensionAPI) {
 			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
 		}
 	};
+	// Only the interactive parent draws a usage bar; subagents run in rpc mode.
+	let stopUsageWatch: (() => void) | undefined;
 	pi.on("session_start", (event, ctx) => {
+		if (ctx.mode === "tui" && !stopUsageWatch) {
+			stopUsageWatch = watchSharedUsage(() => pi.events.emit(USAGE_SOURCE_EVENT, usageSource(PROVIDER_ID)));
+		}
 		piUI = ctx.ui;
 		piUI = withRateLimitNoticeFilter(piUI, () => providerSettings); // fork: provider.rateLimitWarnings
 		piMode = ctx.mode;
@@ -2995,6 +3005,8 @@ export default function (pi: ExtensionAPI) {
 		rejectedToolCalls.delete(ctx?.sessionManager?.getSessionId?.() ?? null);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopUsageWatch?.();
+		stopUsageWatch = undefined;
 		forgetSessionCwd(ctx.sessionManager.getSessionId());
 		closeSessionQueries(ctx.sessionManager.getSessionId());
 		clearSession("session_shutdown");
