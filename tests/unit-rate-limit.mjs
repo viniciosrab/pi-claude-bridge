@@ -161,7 +161,7 @@ describe("delivery to the provider call that owns the stream", () => {
 	const ev = (event) => ({ type: "stream_event", event });
 	const usage = (utilization) => ({
 		type: "rate_limit_event",
-		rate_limit_info: { status: "allowed", rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization, resetsAt: 1789770600 } } },
+		rate_limit_info: { status: "allowed", rateLimitType: "five_hour", unifiedWindows: { five_hour: { utilization, resetsAt: 1789788600 } } },
 	});
 	const toolUse = (id) => [
 		ev({ type: "message_start", message: { id: `msg_${id}`, usage: {} } }),
