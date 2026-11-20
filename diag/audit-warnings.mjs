@@ -8,7 +8,7 @@
 // and tool results queued for a handler that never claimed them. Both are the
 // deadlock signature.
 //
-//   node --import tsx diag/audit-warnings.mjs [claude-bridge.log]
+//   node --import tsx diag/audit-warnings.mjs [bridge.log]
 //
 // Exits 1 if any WARNING/BUG line or stranded handler/result is present.
 // See diag/AUDIT.md for baselines.

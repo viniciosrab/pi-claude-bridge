@@ -45,6 +45,8 @@ describe("the bridge's state dir", () => {
 	it("moves the root's usage snapshots, mirrors and logs into it, and leaves everything else", () => withAgentDir((agentDir) => {
 		writeFileSync(join(agentDir, "claude-bridge-usage-aaa.json"), "usage-a");
 		writeFileSync(join(agentDir, "claude-bridge-usage-bbb.json.123.tmp"), "half");
+		const old = (Date.now() - 120_000) / 1000;
+		utimesSync(join(agentDir, "claude-bridge-usage-bbb.json.123.tmp"), old, old);
 		mkdirSync(join(agentDir, "claude-bridge-mirrors"));
 		writeFileSync(join(agentDir, "claude-bridge-mirrors", "s1.json"), "mirror-1");
 		writeFileSync(join(agentDir, "claude-bridge.log"), "debug");
@@ -89,16 +91,37 @@ describe("the bridge's state dir", () => {
 	}));
 
 	it("leaves the debug log alone when CLAUDE_BRIDGE_DEBUG_PATH names it", () => {
-		const debugPath = join(mkdtempSync(join(tmpdir(), "claude-bridge-state-debug-")), "elsewhere.log");
-		withAgentDir((agentDir) => {
+		const debugDir = mkdtempSync(join(tmpdir(), "claude-bridge-state-debug-"));
+		const debugPath = join(debugDir, "elsewhere.log");
+		try { withAgentDir((agentDir) => {
 			writeFileSync(join(agentDir, "claude-bridge.log"), "debug");
 			mkdirSync(join(agentDir, "cc-cli-logs"));
 			assert.deepEqual(migrateLegacyState(), []);
 			assert.equal(read(join(agentDir, "claude-bridge.log")), "debug");
 			assert.equal(existsSync(join(agentDir, "cc-cli-logs")), true);
 			assert.equal(debugLogPath(), debugPath);
-		}, { debugPath });
+		}, { debugPath }); } finally { rmSync(debugDir, { recursive: true, force: true }); }
 	});
+
+	it("drops a writer's stale temp file, leaves a fresh one and any name it does not know", () => withAgentDir((agentDir) => {
+		const now = Date.now();
+		const old = (now - 120_000) / 1000;
+		const make = (path) => { writeFileSync(path, "x"); return path; };
+		mkdirSync(join(agentDir, "claude-bridge-mirrors"));
+		utimesSync(make(join(agentDir, "claude-bridge-mirrors", "s1.json.11.tmp")), old, old);
+		make(join(agentDir, "claude-bridge-mirrors", "s2.json.12.tmp"));
+		utimesSync(make(join(agentDir, "claude-bridge-usage-aaa.json.13.tmp")), old, old);
+		make(join(agentDir, "claude-bridge-usage-bbb.json.14.tmp"));
+		make(join(agentDir, "claude-bridge-usage-ccc.json.bak"));
+
+		assert.deepEqual(migrateLegacyState(now), []);
+
+		assert.deepEqual(readdirSync(join(agentDir, "claude-bridge-mirrors")), ["s2.json.12.tmp"], "an older bridge may still rename the fresh one");
+		assert.deepEqual(readdirSync(agentDir).filter((n) => n.startsWith("claude-bridge-usage-")).sort(), ["claude-bridge-usage-bbb.json.14.tmp", "claude-bridge-usage-ccc.json.bak"]);
+		utimesSync(join(agentDir, "claude-bridge-mirrors", "s2.json.12.tmp"), old, old);
+		assert.deepEqual(migrateLegacyState(now), []);
+		assert.equal(existsSync(join(agentDir, "claude-bridge-mirrors")), false, "the next activation finishes the move");
+	}));
 
 	it("removes the obsolete session store and usage snapshots older than 30 days", () => withAgentDir((agentDir) => {
 		const now = Date.now();

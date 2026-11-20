@@ -12,7 +12,7 @@
 // Paths resolve per call, so tests can swap PI_CODING_AGENT_DIR mid-process.
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 export function stateDir(): string {
@@ -35,11 +35,31 @@ const LEGACY_USAGE_PREFIX = "claude-bridge-usage-";
 /** Usage snapshots untouched this long belong to an account no longer used. */
 export const USAGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** Moves `from` to `to` unless `to` already exists. Returns whether `from` is gone. */
+/** A writer's temp file (`<name>.<pid>.tmp`) still younger than this may be renamed
+ *  into place any moment by an older bridge in another window: left alone. */
+const TEMP_GRACE_MS = 60_000;
+
+/** Moves `from` to `to` unless `to` already exists; returns whether it moved. A file
+ *  moves by link then unlink, so a `to` another process creates meanwhile fails the
+ *  link (EEXIST) instead of being replaced, as rename would. A directory (cc-cli-logs)
+ *  cannot be linked; rename never replaces one that holds files. */
 function moveIfAbsent(from: string, to: string): boolean {
-	if (existsSync(to)) return false;
-	renameSync(from, to);
+	if (statSync(from).isDirectory()) {
+		if (existsSync(to)) return false;
+		renameSync(from, to);
+		return true;
+	}
+	try { linkSync(from, to); } catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+		throw error;
+	}
+	unlinkSync(from);
 	return true;
+}
+
+/** A writer's leftover temp file, old enough that no writer will rename it any more. */
+function staleTemp(path: string, now: number): boolean {
+	return path.endsWith(".tmp") && now - statSync(path).mtimeMs > TEMP_GRACE_MS;
 }
 
 /** Moves the state earlier versions wrote into the agent dir's root into stateDir(),
@@ -69,8 +89,9 @@ export function migrateLegacyState(now = Date.now()): string[] {
 		const from = join(root, name);
 		step(`move ${name}`, () => {
 			const account = name.slice(LEGACY_USAGE_PREFIX.length);
-			// A write's leftover temp file (`<account>.json.<pid>.tmp`) holds nothing to keep.
-			if (!account.endsWith(".json") || !moveIfAbsent(from, join(usageDir(), account))) rmSync(from, { force: true });
+			if (account.endsWith(".json")) { if (!moveIfAbsent(from, join(usageDir(), account))) rmSync(from, { force: true }); }
+			// A write's leftover temp file holds nothing to keep; any other name is not ours.
+			else if (staleTemp(from, now)) rmSync(from, { force: true });
 		});
 	}
 
@@ -82,9 +103,13 @@ export function migrateLegacyState(now = Date.now()): string[] {
 		step("list legacy mirrors", () => { names = readdirSync(legacyMirrors); });
 		for (const name of names) {
 			const from = join(legacyMirrors, name);
-			step(`move mirror ${name}`, () => { if (!moveIfAbsent(from, join(mirrorsDir(), name))) rmSync(from, { force: true }); });
+			step(`move mirror ${name}`, () => {
+				if (name.endsWith(".json")) { if (!moveIfAbsent(from, join(mirrorsDir(), name))) rmSync(from, { force: true }); }
+				else if (staleTemp(from, now)) rmSync(from, { force: true });
+			});
 		}
-		step("remove legacy mirrors dir", () => rmdirSync(legacyMirrors));
+		// Still holding a fresh temp file: the next activation removes it.
+		step("remove legacy mirrors dir", () => { if (readdirSync(legacyMirrors).length === 0) rmdirSync(legacyMirrors); });
 	}
 
 	// Logs, only at their default place: CLAUDE_BRIDGE_DEBUG_PATH names its own file.

@@ -21,7 +21,7 @@ agree before believing an occurrence:
   * a `toolResult` beginning `Agent failed: API Error: 400` — subagent failures,
     easy to undercount
   * `consumeQuery: error result, subtype=success` in ~/.pi/agent/claude-bridge/logs/bridge.log
-  * `[ERROR] API error (attempt 1/11): 400` in ~/.pi/agent/cc-cli-logs/, which
+  * `[ERROR] API error (attempt 1/11): 400` in ~/.pi/agent/claude-bridge/logs/cc-cli-logs/, which
     carries the server request_id
 
 Account state per request comes from `rate_limit_event` in the bridge log, which

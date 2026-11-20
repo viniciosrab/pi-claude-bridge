@@ -7,7 +7,7 @@
 // 2026 (phantom tool calls, destroyed parallel tool results) were prefix-mutation
 // bugs, which makes this the cheapest always-on integrity signal the bridge has.
 //
-//   node --import tsx diag/audit-cache.mjs [claude-bridge.log]
+//   node --import tsx diag/audit-cache.mjs [bridge.log]
 //
 // Key idea: compare the *query-boundary* break rate against the *in-query* break
 // rate measured from the same log. Within a single query() call the bridge cannot
