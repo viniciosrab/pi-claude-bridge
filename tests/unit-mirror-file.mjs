@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { saveMirror } from "../src/fork.js";
 
-const mirrorDir = () => join(getAgentDir(), "claude-bridge-mirrors");
+const mirrorDir = () => join(getAgentDir(), "claude-bridge", "mirrors");
 
 describe("saveMirror", () => {
 	it("writes an owner-only file, via a temp name of this process", () => {

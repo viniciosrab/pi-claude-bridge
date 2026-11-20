@@ -484,7 +484,7 @@ describe("the deferred turn's relay", () => {
 // pi's /reload re-imports the extension in the same OS process: every in-memory
 // mirror is gone, the files on disk and the aborted CLI (if still shutting down) are
 // not. The abort mark rides the session's mirror file to the next module instance.
-const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${encodeURIComponent(P)}.json`);
+const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${encodeURIComponent(P)}.json`);
 const readMirror = (P) => JSON.parse(readFileSync(mirrorFile(P), "utf8"));
 const editMirror = (P, edit) => writeFileSync(mirrorFile(P), JSON.stringify(edit(readMirror(P))));
 /** A reloaded module: no mirror and no query in memory. */

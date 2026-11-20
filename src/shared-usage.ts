@@ -1,15 +1,15 @@
 // Plan usage shared across pi processes. A subagent runs in its own `pi` process,
 // so the rate_limit_events its Claude Code reports reach only that process's
 // onResponse: the parent's usage bar stood still until the parent's own next
-// request. Every bridge writes its latest event to its account's file under pi's
-// agent dir; the interactive parent watches its account's file and re-registers a
+// request. Every bridge writes its latest event to its account's file in the
+// bridge's state dir (state-dir.ts); the interactive parent watches its account's file and re-registers a
 // usage source with Gentle Shell, which refreshes the bar from it at once.
 
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createHash } from "crypto";
 import { mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from "fs";
 import { basename, dirname, join } from "path";
 import type { RateLimitInfo } from "./rate-limit.js";
+import { usageDir } from "./state-dir.js";
 
 /** Gentle Shell's generic usage-source hook (gentle-pi lib/shell-usage.ts). */
 export const USAGE_SOURCE_EVENT = "gentle-pi:usage-source/v1";
@@ -44,7 +44,7 @@ export function accountKey(env: NodeJS.ProcessEnv = process.env): string {
 
 /** One file per account, so one account's report never replaces another's. */
 export function sharedUsagePath(account = accountKey()): string {
-	return join(getAgentDir(), `claude-bridge-usage-${account}.json`);
+	return join(usageDir(), `${account}.json`);
 }
 
 /** Atomic (write then rename), so a reader never sees half a file. Best effort: the

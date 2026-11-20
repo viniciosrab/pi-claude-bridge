@@ -20,7 +20,7 @@ agree before believing an occurrence:
     ~/.pi/agent/sessions/**
   * a `toolResult` beginning `Agent failed: API Error: 400` — subagent failures,
     easy to undercount
-  * `consumeQuery: error result, subtype=success` in ~/.pi/agent/claude-bridge.log
+  * `consumeQuery: error result, subtype=success` in ~/.pi/agent/claude-bridge/logs/bridge.log
   * `[ERROR] API error (attempt 1/11): 400` in ~/.pi/agent/cc-cli-logs/, which
     carries the server request_id
 
@@ -109,7 +109,7 @@ def tab(title, rows, key):
 def default_log_path():
     """Same resolution as src/log-paths.ts: CLAUDE_BRIDGE_DEBUG_PATH, then pi's agent dir."""
     agent_dir = os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent")
-    return os.environ.get("CLAUDE_BRIDGE_DEBUG_PATH") or os.path.join(agent_dir, "claude-bridge.log")
+    return os.environ.get("CLAUDE_BRIDGE_DEBUG_PATH") or os.path.join(agent_dir, "claude-bridge", "logs", "bridge.log")
 
 
 def main():

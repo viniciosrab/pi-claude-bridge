@@ -17,6 +17,7 @@ import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { withTurnTiming } from "./fork-turn-timing.js"; // fork: debug timing
 import { rememberForkParent, startFromParentFork } from "./fork.js"; // fork: fork cache
 import { removeObsoleteCaptureStore } from "./fork.js"; // fork: obsolete capture store
+import { migrateLegacyState } from "./state-dir.js"; // fork: state dir
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, type PendingToolCall } from "./query-state.js";
@@ -2940,6 +2941,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 // --- Extension registration ---
 
 export default function (pi: ExtensionAPI) {
+	for (const error of migrateLegacyState()) debug(`activation: state dir: ${error}`); // fork: state dir
 	const captureStoreLeft = removeObsoleteCaptureStore(); // fork: obsolete capture store
 	if (captureStoreLeft) debug(`activation: ${captureStoreLeft}`); // fork: obsolete capture store
 	const config = loadConfig();

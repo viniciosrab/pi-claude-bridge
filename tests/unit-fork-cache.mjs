@@ -85,7 +85,7 @@ const toolUse = (id) => [
 const toolResult = (id) => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text: "file" }], isError: false, timestamp: clock++ });
 const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { wait: () => p, open }; };
 const settle = () => new Promise((r) => setTimeout(r, 20));
-const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${P}.json`);
+const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${P}.json`);
 const editMirror = (P, patch) => writeFileSync(mirrorFile(P), JSON.stringify({ ...JSON.parse(readFileSync(mirrorFile(P), "utf8")), ...patch }));
 const sessionFile = (id) => getSessionPath(id, process.cwd(), claudeDir);
 
@@ -225,7 +225,7 @@ describe("a pi session made by /fork", () => {
 	it("rebuilds when another running process owns the parent's CC session", async () => {
 		const P = "pi-fork-owned", C = "pi-fork-owned-child", id = "88888888-8888-4888-8888-888888888888";
 		const { u1, a1, u2, a2 } = await parentWithTwoTurns(P, id);
-		const mirror = join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${P}.json`);
+		const mirror = join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${P}.json`);
 		writeFileSync(mirror, JSON.stringify({ ...JSON.parse(readFileSync(mirror, "utf8")), pid: process.ppid }));
 		forkTo(P, C);
 

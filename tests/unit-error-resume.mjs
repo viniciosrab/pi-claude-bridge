@@ -403,7 +403,7 @@ describe("which failures leave an error mark", () => {
 });
 
 // --- /reload between the error and the next prompt ---
-const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${encodeURIComponent(P)}.json`);
+const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${encodeURIComponent(P)}.json`);
 const readMirror = (P) => JSON.parse(readFileSync(mirrorFile(P), "utf8"));
 const reload = () => { resetSharedSession(); activeQueryContexts.clear(); };
 

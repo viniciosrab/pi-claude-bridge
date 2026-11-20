@@ -91,7 +91,7 @@ const ccWritesSession = (id) => {
 	session.save();
 };
 const sessionFile = (id) => getSessionPath(id, process.cwd(), claudeDir);
-const mirrorDir = () => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors");
+const mirrorDir = () => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors");
 /** A new pi process: no session mirror and no query in memory. */
 const newProcess = () => { resetSharedSession(); __test.activeQueryContexts.clear(); };
 
@@ -218,7 +218,7 @@ describe("a pi session continued in a new process", () => {
 		const sysA = { role: "system", content: "the parent's prompt", toolsAdded: tools, timestamp: clock++ };
 		const sysB = { role: "system", content: "a one-shot's wrapped prompt", toolsAdded: tools, timestamp: clock++ };
 		const u1 = user("first"), a1 = say("first answer"), u2 = user("read a"), u3 = user("next");
-		const mirror = () => JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${P}.json`), "utf8"));
+		const mirror = () => JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${P}.json`), "utf8"));
 
 		scripts.push({ label: "P turn 1", steps: [init("cc-RP"), result("first answer")] });
 		await call(P, [sysA, u1]).result();
