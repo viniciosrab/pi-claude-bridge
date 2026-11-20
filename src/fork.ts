@@ -17,6 +17,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readd
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { sessionCwdFor } from "./session-cwd.js";
+import { mirrorsDir } from "./state-dir.js";
 import { nonSystemMessages } from "./transcript.js";
 
 /** Provider settings only the fork reads, from `provider` in claude-bridge.json. */
@@ -551,7 +552,7 @@ const MAX_TURN_BOUNDARIES = 200;
 const MIRROR_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function mirrorDir(): string {
-	return join(getAgentDir(), "claude-bridge-mirrors");
+	return mirrorsDir();
 }
 
 /** Removes `claude-bridge-captures/`, the prompt-capture store an earlier version kept

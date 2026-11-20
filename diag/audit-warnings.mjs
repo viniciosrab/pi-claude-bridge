@@ -8,7 +8,7 @@
 // and tool results queued for a handler that never claimed them. Both are the
 // deadlock signature.
 //
-//   node --import tsx diag/audit-warnings.mjs [claude-bridge.log]
+//   node --import tsx diag/audit-warnings.mjs [bridge.log]
 //
 // Exits 1 if any WARNING/BUG line or stranded handler/result is present.
 // See diag/AUDIT.md for baselines.
@@ -45,7 +45,7 @@ const inWindow = (iso) => since === null || Date.parse(iso) >= since;
 // script: CLAUDE_BRIDGE_DEBUG_PATH wins, then PI_CODING_AGENT_DIR; ~/.pi/agent is only the default.
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const logPath = args.filter((a, i) => !a.startsWith("--") && i !== sinceArg + 1)[0]
-	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge.log"));
+	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge", "logs", "bridge.log"));
 
 function run() {
 	let text;

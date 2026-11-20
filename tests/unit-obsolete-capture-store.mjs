@@ -32,10 +32,10 @@ describe("the obsolete prompt-capture store", () => {
 		const store = join(agentDir, "claude-bridge-captures");
 		mkdirSync(store, { mode: 0o700 });
 		writeFileSync(join(store, "session.json"), "{}", { mode: 0o600 });
-		mkdirSync(join(agentDir, "claude-bridge-mirrors"));
+		mkdirSync(join(agentDir, "claude-bridge", "mirrors"), { recursive: true });
 		activate(pi());
 		assert.equal(existsSync(store), false, "the captures dir is gone");
-		assert.equal(existsSync(join(agentDir, "claude-bridge-mirrors")), true, "the mirrors stay");
+		assert.equal(existsSync(join(agentDir, "claude-bridge", "mirrors")), true, "the mirrors stay");
 	}));
 
 	it("activation without the directory is fine", () => withAgentDir(() => {

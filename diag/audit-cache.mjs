@@ -7,7 +7,7 @@
 // 2026 (phantom tool calls, destroyed parallel tool results) were prefix-mutation
 // bugs, which makes this the cheapest always-on integrity signal the bridge has.
 //
-//   node --import tsx diag/audit-cache.mjs [claude-bridge.log]
+//   node --import tsx diag/audit-cache.mjs [bridge.log]
 //
 // Key idea: compare the *query-boundary* break rate against the *in-query* break
 // rate measured from the same log. Within a single query() call the bridge cannot
@@ -61,7 +61,7 @@ if (Number.isNaN(since) || Number.isNaN(ceiling)) {
 // script: CLAUDE_BRIDGE_DEBUG_PATH wins, then PI_CODING_AGENT_DIR; ~/.pi/agent is only the default.
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const logPath = args.filter((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"))[0]
-	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge.log"));
+	?? (process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(agentDir, "claude-bridge", "logs", "bridge.log"));
 
 // A turn emits several `usage:` lines reporting the same request as its output
 // grows. Collapsing runs that share (cacheRead, cacheWrite, model) leaves one row

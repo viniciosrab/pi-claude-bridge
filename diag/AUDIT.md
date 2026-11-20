@@ -13,8 +13,8 @@ and the only evidence sat on disk. These scripts make that evidence greppable.
 
 ```
 node --import tsx diag/audit-transcripts.mjs [file.jsonl | projects-dir] [--since YYYY-MM-DD]
-node --import tsx diag/audit-cache.mjs       [claude-bridge.log] [--since YYYY-MM-DD] [--ceiling 0.30]
-node --import tsx diag/audit-warnings.mjs    [claude-bridge.log] [--since YYYY-MM-DD]
+node --import tsx diag/audit-cache.mjs       [bridge.log] [--since YYYY-MM-DD] [--ceiling 0.30]
+node --import tsx diag/audit-warnings.mjs    [bridge.log] [--since YYYY-MM-DD]
 node --import tsx diag/replay-write-path.mjs <pi-session.jsonl>
 ```
 
@@ -52,7 +52,7 @@ Dated baselines below cover the window named with each. Compare a future run aga
 
 ## Anchoring — read this before changing any log scan
 
-Tool output is echoed into `claude-bridge.log` verbatim. A bare `grep WARNING:`
+Tool output is echoed into `claude-bridge/logs/bridge.log` verbatim. A bare `grep WARNING:`
 or `grep '[no tool result recorded]'` matches compiler output, other tools' logs,
 and any file an agent happened to read. Every scan here anchors on the bridge's
 own line prefix `^\[<iso-ts>\] \[<module-id>\] `, and the transcript scanner only
@@ -390,7 +390,7 @@ detector is wired into the ordinary API path (`services/api/claude.ts:1471`
 is emitted by a plain `logForDebugging(summary, { level: 'warn' })` gated only on
 `isDebugMode()` — which the bridge already sets for every query via
 `makeCliDebugOptions` (`src/index.ts:71`). It would land straight in
-`~/.pi/agent/cc-cli-logs/*.log` as:
+`~/.pi/agent/claude-bridge/logs/cc-cli-logs/*.log` as:
 
 ```
 [PROMPT CACHE BREAK] <reason> [source=…, call #N, cache read: X → Y, creation: Z…]

@@ -20,7 +20,7 @@ describe("test harness", () => {
 		// $HOME" check would misfire for anyone whose TMPDIR lives inside their home.
 		assert.notEqual(
 			path,
-			join(getAgentDir(), "claude-bridge.log"),
+			join(getAgentDir(), "claude-bridge", "logs", "bridge.log"),
 			"debug log must not resolve to the real one",
 		);
 	});
@@ -40,7 +40,7 @@ describe("test harness", () => {
 		try {
 			process.env.PI_CODING_AGENT_DIR = "/tmp/log-paths-lazy-probe";
 			process.env.CLAUDE_BRIDGE_DEBUG_PATH = "/tmp/log-paths-lazy-probe-debug.log";
-			assert.equal(diagLogPath(), "/tmp/log-paths-lazy-probe/claude-bridge-diag.log");
+			assert.equal(diagLogPath(), "/tmp/log-paths-lazy-probe/claude-bridge/logs/diag.log");
 			assert.equal(debugLogPath(), "/tmp/log-paths-lazy-probe-debug.log");
 		} finally {
 			if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -63,8 +63,8 @@ describe("log paths", () => {
 			`const p = await import(${JSON.stringify(src)}); console.log(JSON.stringify({ DEBUG_LOG_PATH: p.debugLogPath(), DIAG_LOG_PATH: p.diagLogPath() }));`,
 		], { env, encoding: "utf8" });
 		assert.deepEqual(JSON.parse(out), {
-			DEBUG_LOG_PATH: "/tmp/pi-agent-dir-probe/claude-bridge.log",
-			DIAG_LOG_PATH: "/tmp/pi-agent-dir-probe/claude-bridge-diag.log",
+			DEBUG_LOG_PATH: "/tmp/pi-agent-dir-probe/claude-bridge/logs/bridge.log",
+			DIAG_LOG_PATH: "/tmp/pi-agent-dir-probe/claude-bridge/logs/diag.log",
 		});
 	});
 });

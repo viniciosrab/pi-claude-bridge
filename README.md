@@ -68,7 +68,7 @@ Plan access is separate: on Pro, Fable 5 needs Extra Usage (5.1 is assumed the s
 - **Every turn fails with an auth error.** Unset any `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` you export: they redirect Claude Code away from your subscription.
 - **Claude Code hooks add duplicate guidance.** `~/.claude/settings.json` hooks also fire in bridge turns. Have the hook skip them: `[ -n "$PI_CODING_AGENT" ] && exit 0`.
 
-For bug reports, set `CLAUDE_BRIDGE_DEBUG=1` and attach `claude-bridge.log` plus the matching file in `cc-cli-logs/`, both in pi's agent dir (`~/.pi/agent` by default), to a [new issue](https://github.com/viniciosrab/pi-claude-bridge/issues/new).
+For bug reports, set `CLAUDE_BRIDGE_DEBUG=1` and attach `bridge.log` plus the matching file in `cc-cli-logs/`, both in `claude-bridge/logs/` inside pi's agent dir (`~/.pi/agent/claude-bridge/logs/` by default), to a [new issue](https://github.com/viniciosrab/pi-claude-bridge/issues/new).
 
 Extension authors and contributors: see the [reference](docs/reference.md).
 

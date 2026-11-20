@@ -56,7 +56,7 @@ function publishAs(account, usage, at) {
 
 afterEach(() => {
 	const dir = dirname(sharedUsagePath());
-	for (const name of readdirSync(dir)) if (name.startsWith("claude-bridge-usage-")) rmSync(join(dir, name), { force: true });
+	rmSync(dir, { recursive: true, force: true });
 	if (token === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 	else process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
 });

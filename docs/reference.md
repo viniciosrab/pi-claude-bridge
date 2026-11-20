@@ -51,11 +51,21 @@ Config: `~/.pi/agent/claude-bridge.json` (global). `provider` in a project's `.p
 
 Integration tests spawn real `pi` and Claude Code subprocesses and need write access to `~/.claude` — a sandbox that blocks it makes `--resume` fail with `No conversation found with session ID`.
 
+## Files
+
+The bridge reads its configuration from `claude-bridge.json` in pi's agent dir (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) and keeps the state it writes in `claude-bridge/` beside it:
+
+- `usage/<account>.json` — the latest plan usage of each Claude account, shared across pi processes. A snapshot no process refreshed in 30 days is removed.
+- `mirrors/<session>.json` — which Claude Code session serves each pi session, so another process can resume it. Removed after 7 days.
+- `logs/` — the debug logs below and `diag.log`, written for paths that should never run.
+
+At activation the bridge moves what an earlier version wrote into the agent dir itself (`claude-bridge-usage-*.json`, `claude-bridge-mirrors/`, `claude-bridge.log`, `claude-bridge-diag.log`, `cc-cli-logs/`) into this folder.
+
 ## Debugging
 
 Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 
-- **Bridge log** at `claude-bridge.log` in pi's agent dir (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) — provider calls, session sync decisions, tool results, CC stderr. Override location with `CLAUDE_BRIDGE_DEBUG_PATH`.
+- **Bridge log** at `claude-bridge/logs/bridge.log` in pi's agent dir (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) — provider calls, session sync decisions, tool results, CC stderr. Override location with `CLAUDE_BRIDGE_DEBUG_PATH`.
 - **Per-query CC CLI logs** at `cc-cli-logs/<timestamp>-<tag>-<seq>.log` in the same directory — the subprocess's own debug stream; tag is `provider` or `compact-summary`. Shows CC's view of session loading, API requests, and tool calls.
 
 When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the `syncResult:` lines from the bridge log plus the matching `cc-cli-logs/` file for the failing query.
@@ -98,6 +108,6 @@ The bridge does not show plan usage itself. Claude Code sends a `rate_limit_even
 
 **Files Claude Code edits are not carried across a rebuild.** The edit itself survives in the history as a tool call and result — what's lost is the post-edit file snapshot. `@file` expansions *are* carried.
 
-**A system prompt change rebuilds the session, and waits for the next prompt.** Claude Code records the prompt a session was created with and re-sends it on every resume, ignoring the one the bridge passes (`tests/int-cc-contracts.mjs`). So the bridge keeps a digest of the prompt it sends (the `systemPromptPreset` setting plus pi's whole prompt) with the session's mirror in `claude-bridge-mirrors/`, and when the next prompt's digest differs (a tool turned on, an extension's section, a changed `systemPromptPreset`) it rebuilds Claude Code's session from pi's history instead of resuming it, after an abort, an API error, a `/reload` or in a new window too; a `/fork` rebuilds instead of forking a parent made with another prompt. That request re-caches the whole conversation once, as a changed system prompt does on any provider. A change pi makes while a turn runs, between tool calls, reaches Claude at the next prompt: the running Claude Code query keeps the prompt it started with.
+**A system prompt change rebuilds the session, and waits for the next prompt.** Claude Code records the prompt a session was created with and re-sends it on every resume, ignoring the one the bridge passes (`tests/int-cc-contracts.mjs`). So the bridge keeps a digest of the prompt it sends (the `systemPromptPreset` setting plus pi's whole prompt) with the session's mirror in `claude-bridge/mirrors/`, and when the next prompt's digest differs (a tool turned on, an extension's section, a changed `systemPromptPreset`) it rebuilds Claude Code's session from pi's history instead of resuming it, after an abort, an API error, a `/reload` or in a new window too; a `/fork` rebuilds instead of forking a parent made with another prompt. That request re-caches the whole conversation once, as a changed system prompt does on any provider. A change pi makes while a turn runs, between tool calls, reaches Claude at the next prompt: the running Claude Code query keeps the prompt it started with.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.

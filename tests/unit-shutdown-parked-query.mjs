@@ -156,7 +156,7 @@ const toolUse = (id) => [
 	ev({ type: "message_stop" }),
 ];
 const shutdown = (P) => { for (const fn of handlers.session_shutdown) fn({}, { sessionManager: { getSessionId: () => P } }); };
-const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge-mirrors", `${encodeURIComponent(P)}.json`);
+const mirrorFile = (P) => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge", "mirrors", `${encodeURIComponent(P)}.json`);
 const reload = () => { resetSharedSession(); __test.activeQueryContexts.clear(); };
 
 describe("session_shutdown (upstream #210 port)", () => {
